@@ -45,13 +45,16 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from goldsweep.analysis.structure import Direction
 from goldsweep.core.clock import SessionCalculator, ensure_utc
 from goldsweep.core.settings import DayBoundaryConfig, NewsConfig, RiskConfig
 from goldsweep.data.broker import SymbolSpec
 from goldsweep.risk.risk_manager import HIGH_IMPACT, NewsEvent, RiskManager
+
+if TYPE_CHECKING:
+    from goldsweep.analysis.refine import RefineResult, RefineSetup
 
 TARGET_NAMES = ("tp1", "tp2", "tp3")
 
@@ -278,6 +281,36 @@ def entry_deadline(
     return deadline, note
 
 
+def refined_plan(setup: RefineSetup, result: RefineResult, *, tp3_r: float = 0.0) -> TradePlan:
+    """The order for an M5 setup refined on M1 (D83): the setup's targets, the
+    refined entry and stop, placed when the M1 turn closed."""
+    if result.time is None or result.entry is None or result.stop_loss is None:
+        raise InvalidPlan(f"{setup.id}: the refinement has not produced an entry")
+    sign = setup.direction.sign
+    risk = (result.entry - result.stop_loss) * sign
+    return TradePlan(
+        id=setup.id,
+        time=result.time,
+        direction=setup.direction,
+        session=setup.session,
+        entry_mode=result.entry_mode,
+        entry=result.entry,
+        stop_loss=result.stop_loss,
+        take_profit_1=setup.take_profit_1,
+        take_profit_2=setup.take_profit_2,
+        expires_at=result.order_expires_at or setup.expires_at,
+        score=setup.score,
+        risk_reward_1=(setup.take_profit_1 - result.entry) * sign / risk if risk > 0 else 0.0,
+        take_profit_3=third_target(
+            setup.direction,
+            result.entry,
+            result.stop_loss,
+            (setup.take_profit_1, setup.take_profit_2),
+            tp3_r,
+        ),
+    )
+
+
 def third_target(
     direction: Direction,
     entry: float,
@@ -415,6 +448,8 @@ class Outcome(StrEnum):
     #: withdrawn unfilled before a news blackout, the rollover block, the Friday
     #: cutoff or the weekend (see :func:`entry_deadline`)
     WITHDRAWN = "withdrawn"
+    #: M1 refinement (D83): the turn inside the gap never came, or the setup failed
+    NO_TRIGGER = "no_trigger"
     REFUSED = "refused"  # the broker refused the order (live trading)
 
 

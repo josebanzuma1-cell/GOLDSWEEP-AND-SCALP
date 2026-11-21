@@ -77,6 +77,11 @@ XAUUSD-only trading assistant. The full specification is `docs/SPEC.md`
   submitted, in the simulator and in `live.py`, so its expiry stops before the next
   news blackout, rollover block, Friday cutoff or weekend. `entry_expiry_bars` is not
   part of the signal cache key: the simulator applies it (D82).
+- **M1 refinement** (`analysis/refine.py`, D83) is a pure function of a saved
+  `RefineSetup` and the closed M1 bars; live trading re-runs it each minute
+  (`Trader.refine_job`), the simulator once per setup. Refined orders are built with
+  `refined_plan` and go through the same deadline rule, risk checks and executor.
+  `strategy.refinement` is not part of the signal cache key.
 - **Only `execution/mt5_gateway.py` sends orders.** Tests drive it with
   `tests/fake_mt5_trading.py` (a fake trade server); never send orders from tests.
   Real-terminal checks use `order_check` only, which validates without trading.

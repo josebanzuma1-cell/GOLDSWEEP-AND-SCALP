@@ -27,6 +27,7 @@ import numpy as np
 import pandas as pd
 
 from goldsweep.analysis.pressure import STRUCTURE_BARS, pressure_meter
+from goldsweep.analysis.refine import M1Refinement
 from goldsweep.analysis.signals import SignalEngine
 from goldsweep.backtest.data import fingerprint
 from goldsweep.backtest.metrics import (
@@ -145,9 +146,11 @@ def cache_key(settings: Settings, data: MarketData, start: dt.datetime, end: dt.
         "point": data.spec.point,
         "start": ensure_utc(start).isoformat(),
         "end": ensure_utc(end).isoformat(),
-        # How long an entry waits changes no signal, only the trading: it is applied
-        # by the simulator, so trying other expiries reuses the same signal pass.
-        "strategy": config.strategy.model_dump(mode="json", exclude={"entry_expiry_bars"}),
+        # How long an entry waits, and the M1 refinement, change no signal, only the
+        # trading: the simulator applies them, so trying others reuses the signal pass.
+        "strategy": config.strategy.model_dump(
+            mode="json", exclude={"entry_expiry_bars", "refinement"}
+        ),
         "timeframes": config.timeframes.model_dump(mode="json"),
         "sessions": config.sessions.model_dump(mode="json"),
         "pressure": config.pressure.model_dump(mode="json"),
@@ -286,17 +289,29 @@ def build_simulator(
     trail = TrailLevels.from_candles(
         data.trigger, config.timeframes.trigger, config.strategy.swing_lookback
     )
+    strategy = config.strategy
+    refinement = None
+    if strategy.refinement.mode == "m1":
+        m1 = data.fine if data.fine is not None else data.trigger.iloc[0:0]
+        refinement = M1Refinement(
+            strategy.refinement,
+            m1,
+            atr_period=strategy.atr_period,
+            atr_method=strategy.atr_method,
+            min_rr=strategy.min_rr,
+        )
     return Simulator(
         series,
         data.spec,
         config.risk,
         config.news,
         config.backtest,
-        config.strategy.liquidity.day_boundary,
+        strategy.liquidity.day_boundary,
         trail=trail,
         events=events,
         sessions=SessionCalculator(config.sessions),
-        entry_lifetime=config.timeframes.trigger.duration * config.strategy.entry_expiry_bars,
+        entry_lifetime=config.timeframes.trigger.duration * strategy.entry_expiry_bars,
+        refinement=refinement,
     )
 
 
@@ -324,6 +339,20 @@ def limitations(settings: Settings, data: MarketData, *, events: Sequence[NewsEv
             f"{config.timeframes.trigger.value} bars, assuming the worse order inside each bar. "
             "Downloading M1 history (--with-m1) makes this more precise."
         )
+    refinement = config.strategy.refinement
+    if refinement.mode == "m1":
+        if data.fine is None or data.fine.empty:
+            notes.append(
+                "Entries are refined on one-minute bars (strategy.refinement), but no M1 "
+                "history was stored, so no setup could be refined and nothing was traded. "
+                "Download it with --with-m1."
+            )
+        else:
+            notes.append(
+                f"Entries are refined on one-minute bars (D83): {refinement.confirm} turn, "
+                f"{refinement.entry} entry. Setups whose turn never came are listed as "
+                "no_trigger."
+            )
     notes.append(
         "Spreads come from the bars, which do not show the widest moments (news spikes). "
         "backtest.costs.extra_spread_points adds a margin to stress-test this."

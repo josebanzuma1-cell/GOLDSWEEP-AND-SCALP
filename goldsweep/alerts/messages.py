@@ -24,6 +24,7 @@ from typing import Any
 from goldsweep.ai.news_bias import NewsBias
 from goldsweep.ai.scenarios import ScenarioBrief
 from goldsweep.analysis.pressure import PressureReading
+from goldsweep.analysis.refine import RefineSetup
 from goldsweep.analysis.signals import POST_NEWS, Signal
 from goldsweep.analysis.zones import ZoneKind
 from goldsweep.core.clock import SESSION_LABELS
@@ -31,7 +32,14 @@ from goldsweep.data.calendar import EconomicEvent
 from goldsweep.execution.book import BookEvent, EventKind, ExitReason, Outcome, TradePlan
 
 _ZONE_NAMES = {ZoneKind.FVG: "FVG", ZoneKind.IFVG: "IFVG", ZoneKind.ORDER_BLOCK: "order block"}
-_ENTRY_SPOT = {"fvg_mid": "mid", "fvg_top": "top", "fvg_bottom": "bottom"}
+_ENTRY_SPOT = {
+    "fvg_mid": "mid",
+    "fvg_top": "top",
+    "fvg_bottom": "bottom",
+    "fvg_near": "near edge",
+    "fvg_far": "far edge",
+    "ote": "OTE",
+}
 
 
 def session_name(session: str | None) -> str:
@@ -110,6 +118,37 @@ def signal_alert(
     lines.append(f"Action: {action}")
     lines.append(f"Mode: {mode}  |  id: {signal.id}")
     return "\n".join(lines)
+
+
+def refined_entry(
+    setup: RefineSetup,
+    plan: TradePlan,
+    *,
+    symbol: str,
+    action: str,
+    traded: bool,
+    mode: str,
+    risk_pct: float,
+) -> str:
+    """The M1 turn came inside the gap (D83): the refined order and what was done."""
+    icon = "🎯" if traded else "⛔"
+    how = "market" if plan.entry_mode == "market" else "M1 FVG mid, limit"
+    lines = [
+        f"{icon} {symbol} {plan.direction.value} sniper entry (M1) — {setup.id}",
+        f"Entry: {plan.entry:.2f} ({how}) | SL: {plan.stop_loss:.2f} (M5 stop was "
+        f"{setup.stop_loss:.2f}) | TP1: {plan.take_profit_1:.2f} | TP2: "
+        f"{_price(plan.take_profit_2)}"
+        + (f" | TP3: {plan.take_profit_3:.2f}" if plan.take_profit_3 is not None else ""),
+        f"R:R {plan.risk_reward_1:.1f} | Risk {risk_pct:g}%",
+        f"Action: {action}",
+        f"Mode: {mode}",
+    ]
+    return "\n".join(lines)
+
+
+def refine_dropped(setup: RefineSetup, detail: str, mode: str) -> str:
+    """An armed setup ends without an M1 entry (D83)."""
+    return f"⌛ {mode} {setup.direction.value} {setup.id}: no sniper entry ({detail})"
 
 
 def trade_message(event: BookEvent, mode: str) -> str | None:

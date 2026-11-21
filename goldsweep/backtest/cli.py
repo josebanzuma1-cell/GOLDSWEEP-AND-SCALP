@@ -311,7 +311,8 @@ def main(
                     load_end,
                     download=args.download,
                     offline=args.offline,
-                    with_m1=args.with_m1,
+                    # M1 refinement needs the one-minute history (D83).
+                    with_m1=args.with_m1 or settings.config.strategy.refinement.mode == "m1",
                     broker_factory=broker_factory or (lambda s: create_broker(s)),
                     say=say,
                 )

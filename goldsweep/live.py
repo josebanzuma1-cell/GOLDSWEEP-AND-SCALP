@@ -47,18 +47,25 @@ from goldsweep.alerts.telegram import Command, Notifier, TelegramBot, make_notif
 from goldsweep.analysis.bias import compute_bias
 from goldsweep.analysis.indicators import latest_atr
 from goldsweep.analysis.pressure import STRUCTURE_BARS, PressureReading, pressure_meter
+from goldsweep.analysis.refine import (
+    CONTEXT_BARS,
+    RefineResult,
+    RefineSetup,
+    RefineStatus,
+    refine,
+)
 from goldsweep.analysis.signals import Signal, SignalEngine
 from goldsweep.backtest.engine import spread_points as cost_spreads
 from goldsweep.backtest.simulator import TrailLevels
 from goldsweep.core.clock import UTC, Clock, SessionCalculator, SystemClock, ensure_utc
 from goldsweep.core.logging import get_logger, setup_logging, shutdown_logging
 from goldsweep.core.settings import Settings
-from goldsweep.core.types import Mode
+from goldsweep.core.types import Mode, Timeframe
 from goldsweep.data.broker import BrokerClient, BrokerError
 from goldsweep.data.calendar import CalendarService, EconomicEvent, is_blackout_event
 from goldsweep.data.factory import create_broker
 from goldsweep.data.news import NewsService
-from goldsweep.execution.book import Bar, BookEvent, EventKind, TradePlan, to_ns
+from goldsweep.execution.book import Bar, BookEvent, EventKind, TradePlan, refined_plan, to_ns
 from goldsweep.execution.executor import Executor, PaperExecutor
 from goldsweep.execution.panel import PanelWriter
 from goldsweep.risk.risk_manager import NewsEvent
@@ -82,6 +89,11 @@ DUPLICATE_WINDOW = dt.timedelta(hours=12)
 #: The news job runs every minute: waiting entries are withdrawn when a blackout
 #: begins within the next minute, so none can fill inside it.
 WITHDRAW_LEAD = dt.timedelta(minutes=1)
+#: M1 refinement (D83): bars read before the oldest armed setup, the most read at
+#: once, and how long after its window a setup may wait for the deciding bar.
+REFINE_CONTEXT_BARS = CONTEXT_BARS
+REFINE_MAX_BARS = 2000
+REFINE_GRACE = dt.timedelta(minutes=5)
 MEDIAN_SPREAD_MIN_SAMPLES = 30
 EXIT_OK, EXIT_BROKER, EXIT_REFUSED, EXIT_NOT_CONFIRMED = 0, 1, 2, 3
 
@@ -207,6 +219,8 @@ class Trader:
         prefix = "live" if self.live else "paper"
         self._state_last_bar = f"{prefix}.last_bar"
         self._state_trading = f"{prefix}.trading"
+        #: Setups waiting for their M1 turn (D83), saved so a restart carries on.
+        self._state_refining = f"{prefix}.refining"
         self.engine = SignalEngine.from_settings(
             settings, point=self.spec.point, symbol=self.spec.name
         )
@@ -432,7 +446,7 @@ class Trader:
         since = int((signal.time - DUPLICATE_WINDOW).timestamp())
         rows = self._db.query(
             "SELECT id, detail FROM signals WHERE time >= ? AND direction = ? "
-            "AND action IN ('traded', 'blocked', 'alert')",
+            "AND action IN ('traded', 'blocked', 'alert', 'armed')",
             (since, signal.direction.value),
         )
         for signal_id, detail in rows:
@@ -492,6 +506,15 @@ class Trader:
                 "alert",
                 f"alert only: score below the auto-trade threshold {signal.auto_trade_threshold:g}",
             )
+        elif self._config.strategy.refinement.mode == "m1":
+            # D83: no order yet; the refine job waits for the M1 turn inside the gap.
+            self._save_armed(
+                [*self._armed(), RefineSetup.from_signal(signal, expires_at=plan.expires_at)]
+            )
+            action = "armed"
+            text = f"waiting for an M1 turn inside the gap until {plan.expires_at:%H:%M} UTC"
+            if plan.expiry_note:
+                text += f" (before {plan.expiry_note})"
         else:
             event = self.executor.submit(
                 plan, spread_points=spread, median_spread_points=median, events=blackouts
@@ -567,6 +590,103 @@ class Trader:
                 json.dumps(detail),
             ),
         )
+
+    # -- M1 refinement: "sniper" entries (D83) ------------------------------------------ #
+
+    def _armed(self) -> list[RefineSetup]:
+        return [
+            RefineSetup.from_state(item) for item in self._db.get_state(self._state_refining, [])
+        ]
+
+    def _save_armed(self, setups: Sequence[RefineSetup]) -> None:
+        self._db.set_state(self._state_refining, [setup.to_state() for setup in setups])
+
+    def refine_job(self) -> None:
+        """Called each minute: every armed setup is checked against the closed M1 bars."""
+        try:
+            with self._lock:
+                self.refine_tick()
+        except BrokerError as exc:
+            log.error("broker error in the refine job", error=str(exc))
+        except Exception as exc:  # noqa: BLE001 - keep the loop alive; the error is logged
+            log.error("refine job failed", error=repr(exc))
+
+    def refine_tick(self) -> None:
+        armed = self._armed()
+        if not armed:
+            return
+        now = ensure_utc(self._clock.now())
+        strategy = self._config.strategy
+        oldest = min(setup.time for setup in armed)
+        count = int((now - oldest).total_seconds() // 60) + REFINE_CONTEXT_BARS + 5
+        bars = self._broker.get_rates(self.spec.name, Timeframe.M1, min(count, REFINE_MAX_BARS))
+        keep: list[RefineSetup] = []
+        for setup in armed:
+            result = refine(
+                setup,
+                bars,
+                strategy.refinement,
+                atr_period=strategy.atr_period,
+                atr_method=strategy.atr_method,
+                min_rr=strategy.min_rr,
+            )
+            if result.status is RefineStatus.WAITING:
+                if now < ensure_utc(setup.expires_at) + REFINE_GRACE:
+                    keep.append(setup)
+                    continue
+                result = RefineResult(RefineStatus.EXPIRED, "no M1 turn inside the gap in time")
+            if result.status is RefineStatus.READY:
+                self._place_refined(setup, result, now)
+            else:
+                self._db.execute(
+                    "UPDATE signals SET action = ? WHERE id = ?", ("no_trigger", setup.id)
+                )
+                self._send(messages.refine_dropped(setup, result.detail, self.label))
+        self._save_armed(keep)
+
+    def _place_refined(self, setup: RefineSetup, result: RefineResult, now: dt.datetime) -> None:
+        blackouts = self._news.blackouts(now) if self._news else []
+        plan = refined_plan(setup, result, tp3_r=self._config.risk.tp3_r).with_deadline(
+            sessions=self._sessions,
+            events=blackouts,
+            blackout_before_min=self._config.news.blackout_before_min,
+        )
+        follow_up: list[BookEvent] = []
+        traded = False
+        if self.trading != ACTIVE:
+            action, text = "alert", f"not traded: trading is {self.trading}"
+        else:
+            spread = float(self._broker.spread_points(self.spec.name))
+            median = self._db.median_spread(
+                self.spec.name,
+                since=now - dt.timedelta(days=self._config.risk.spread_median_days),
+                min_samples=MEDIAN_SPREAD_MIN_SAMPLES,
+            )
+            event = self.executor.submit(
+                plan, spread_points=spread, median_spread_points=median, events=blackouts
+            )
+            if event.kind is EventKind.PLACED:
+                traded, action, text = True, "traded", self._order_text(plan, event)
+                follow_up = self.executor.sync(now)  # a market order fills at once
+            else:
+                action, text = "blocked", f"blocked: {event.detail}"
+        self._db.execute(
+            "UPDATE signals SET action = ?, entry = ?, stop_loss = ? WHERE id = ?",
+            (action, plan.entry, plan.stop_loss, setup.id),
+        )
+        log.info("refined entry", id=setup.id, action=action, entry=plan.entry, stop=plan.stop_loss)
+        self._send(
+            messages.refined_entry(
+                setup,
+                plan,
+                symbol=self.spec.name,
+                action=text,
+                traded=traded,
+                mode=self.label,
+                risk_pct=self._config.risk.risk_per_trade_pct,
+            )
+        )
+        self._report(follow_up)
 
     # -- following the broker (live) ------------------------------------------------- #
 
@@ -723,6 +843,7 @@ class Trader:
     def _kill_switch(self) -> str:
         now = ensure_utc(self._clock.now())
         self._set_trading(STOPPED)  # first: nothing new may start while closing
+        self._save_armed([])  # setups waiting for an M1 entry are dropped too
         tick = self._broker.get_tick(self.spec.name)
         events = self.executor.close_everything(now, tick.bid, tick.ask, "kill switch (/stop)")
         self._report(events)
@@ -748,7 +869,7 @@ class Trader:
         current = self._sessions.status(now)
         if current.allowed and current.session:
             window = f"{messages.session_name(current.session)} open now"
-        return messages.status_message(
+        text = messages.status_message(
             mode=self.label,
             state=self.trading,
             equity=self.executor.equity,
@@ -759,6 +880,11 @@ class Trader:
             next_window=window,
             llm=self._news.analyzer.llm_status(now) if self._news else "news layer off",
         )
+        armed = self._armed()
+        if armed:
+            waiting = ", ".join(f"{s.id} until {s.expires_at:%H:%M} UTC" for s in armed)
+            text += f"\nWaiting for an M1 entry: {waiting}"
+        return text
 
     # -- news, warnings, scenarios, summary ---------------------------------------- #
 
@@ -958,6 +1084,14 @@ def _schedule(trader: Trader, settings: Settings, bot: TelegramBot | None, clock
         coalesce=True,
         misfire_grace_time=120,
     )
+    if settings.config.strategy.refinement.mode == "m1":
+        scheduler.add_job(
+            trader.refine_job,
+            CronTrigger(minute="*", second=delay, timezone=UTC),
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
     scheduler.add_job(
         trader.news_tick,
         IntervalTrigger(minutes=1, timezone=UTC),

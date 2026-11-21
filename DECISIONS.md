@@ -1055,3 +1055,44 @@ before on every measure shown. Read with care:
 
 The spec's 6 bars stays the code default; `tests/test_settings.py` lists this as a
 recorded change.
+
+### D83. M1 "sniper" entries: built, tested, and left off
+
+**What it does** (`analysis/refine.py`, `strategy.refinement`). With `mode: m1` an
+M5 setup that would trade is *armed* instead: no order is sent. Each minute the
+closed M1 bars are checked. When price has come back to the gap's near edge and
+then turns (a close through the last M1 swing high before the pullback's low,
+`choch`, or through the open of the last run of down-closing candles into it,
+`cisd`; shorts mirrored), the order is placed at that close (`market`) or as a
+limit in the middle of the M1 gap the turn left (`fvg_mid`). The stop goes beyond
+the pullback's extreme (0.2 M1 ATR plus the spread), never closer than 4 spreads or
+1 M1 ATR and never beyond the M5 stop; the M5 targets stay. Nothing is traded when
+the entry window ends first, when price reaches TP1 before the gap, or when it
+trades through the M5 stop (`no_trigger`). The refiner is a pure function of the
+setup and the closed M1 bars, so a live run, a restart (armed setups are saved) and
+a backtest agree. Live: a one-minute job; the alert says "waiting for an M1 turn
+inside the gap until ..."; the refined order gets its own message (🎯) and goes
+through the same risk checks, deadline rule and executor as any other order; the
+kill switch drops armed setups. The backtester needs the M1 history and downloads
+it when refinement is on (1,014,942 bars for 2024-2026).
+
+**Results, 2024-01-01 to 2026-10-31,** M1 fills for every variant, threshold 60,
+entries wait 24 bars (D82):
+
+| Entry | Trades | Won | Per trade | Profit factor | Return | Max DD | From 2024-07 on | By year (R) |
+|---|---|---|---|---|---|---|---|---|
+| **M5 gap middle (no refinement)** | **54** | **20%** | **+0.47 R** | **2.10** | **+12.3%** | **2.4%** | **44, +0.40 R** | **+15.9 / +8.5 / +0.7** |
+| M1 choch, market | 40 | 10% | -0.17 R | 0.70 | -3.2% | 5.2% | 35, -0.10 R | -3.2 / +1.8 / -5.3 |
+| M1 choch, M1 gap | 29 | 10% | +0.02 R | 1.03 | +0.2% | 3.2% | 25, +0.07 R | -6.5 / +6.1 / +0.9 |
+| M1 cisd, market | 51 | 10% | +0.29 R | 1.49 | +6.2% | 4.1% | 45, +0.35 R | -3.9 / +23.9 / -5.4 |
+| M1 cisd, M1 gap | 47 | 11% | +0.63 R | 2.24 | +13.6% | 3.3% | 43, +0.72 R | -6.8 / +37.5 / -1.2 |
+
+**Decision: `refinement.mode` stays `none`.** The tighter stop is hit about twice
+as often (one trade in ten wins instead of one in five), so the result rests on a
+few very large winners. The best-looking variant (cisd, M1 gap) had 5 winning
+trades out of 47; its top 3 trades carry the whole result (without them it is
+-11.9 R, against +6.0 R for the plain entry without its top 3), and it lost money
+in two of the three years. The plain M5 entry is steadier: positive or flat in
+every year. On this history the sniper entry does not earn its place; it stays in
+the code, tested, to be switched on only if later evidence (a longer history, or
+demo trading) says otherwise.

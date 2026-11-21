@@ -29,7 +29,7 @@ review after each one.
 | 6 | Live execution on a demo account, three-target split, on-chart panel | built, tested, approved |
 | 7 | Streamlit dashboard: chart, scenarios, news, trades, risk, equity, backtests, kill switch | built, tested, approved |
 | 8 | Unattended running (Task Scheduler, /golive), heartbeat, watchdog, backups, VPS guide | built, tested, approved |
-| 9 | More trades and "sniper" entries: (1) entries that fill and never wait into a blocked time, (2) M1 refinement, (3) more setup models | stage 1 built and tested, awaiting approval |
+| 9 | More trades and "sniper" entries: (1) entries that fill and never wait into a blocked time, (2) M1 refinement, (3) more setup models | stage 1 approved; stage 2 built and tested (left off, D83), awaiting approval |
 
 Only `python main.py --live` sends orders to a broker, and only after
 `MODE=LIVE` in `.env`, `mode: LIVE` in `config.yaml` and the account number typed
@@ -54,7 +54,9 @@ liquidity), on closed bars only, so a backtest and a live run see the same thing
    hours (`entry_expiry_bars: 24`, D82). Stop beyond the sweep's extreme,
    targets at the next external liquidity, rejected below 2R. `entry_mode` can
    also place it at the gap's near or far edge or at the optimal trade entry
-   (`ote`, 70.5% back).
+   (`ote`, 70.5% back). Optional "sniper" entries (`strategy.refinement.mode: m1`)
+   wait for price to turn inside the gap on one-minute bars and enter with a
+   tighter stop; they are off because they did worse on 2024-2026 (D83).
 6. **Score** 0-100 from ten components. 60 or more is worth an alert. The
    spec trades from 75; on the demo account `auto_trade_threshold` is set to 60
    so that enough trades happen to judge the strategy (D81). A neutral H1 bias

@@ -325,6 +325,57 @@ def test_the_configured_entry_lifetime_replaces_the_signals_own(base_signal: Sig
     assert [o.outcome for o in shorter.outcomes] == [Outcome.EXPIRED]
 
 
+def refined_run(base_signal: Signal, rows: Sequence[Row]) -> SimulationResult:
+    """The M1 fixture of tests/test_refine.py, traded with M1 refinement (D83)."""
+    from goldsweep.analysis.refine import M1Refinement
+    from tests.test_refine import CONTEXT, PLAIN, SETUP_TIME
+
+    frame = bars(CONTEXT + list(rows), SETUP_TIME - 30 * dt.timedelta(minutes=1), minutes=1)
+    simulator = Simulator(
+        PriceSeries.from_candles(frame, Timeframe.M1, point=GOLD.point),
+        GOLD,
+        TWO_TARGETS,
+        NewsConfig(),
+        FREE,
+        DayBoundaryConfig(),
+        refinement=M1Refinement(PLAIN, frame),
+    )
+    signal = make_signal(base_signal, time=SETUP_TIME, stop=2026.0, tp1=2045.0, tp2=2050.0)
+    return simulator.run(
+        [record(signal)],
+        select=lambda _record: None,
+        start=SETUP_TIME - dt.timedelta(days=1),
+        end=SETUP_TIME + dt.timedelta(days=1),
+    )
+
+
+def test_a_refined_entry_is_placed_when_the_m1_turn_closes(base_signal: Signal) -> None:
+    from tests.test_refine import PULLBACK
+
+    to_tp1: Row = (2031.9, 2045.2, 2031.8, 2045.0)
+    to_tp2: Row = (2045.0, 2050.3, 2044.9, 2050.0)
+    trade = only_trade(refined_run(base_signal, [*PULLBACK, to_tp1, to_tp2]))
+    # The turn closed at 08:10; the market order fills at the 08:10 open on the ask.
+    assert trade.fill_time == dt.datetime(2026, 11, 17, 8, 10, tzinfo=dt.UTC)
+    assert trade.fill_price == pytest.approx(2031.6 + 0.2)
+    assert trade.stop_loss == pytest.approx(2028.3)  # the refined stop, not the M5 one
+    assert [leg.reason for leg in trade.legs] == [ExitReason.TP1, ExitReason.TP2]
+
+
+def test_no_trade_when_the_m1_turn_never_comes(base_signal: Signal) -> None:
+    from tests.test_refine import PULLBACK
+
+    result = refined_run(base_signal, PULLBACK[:7] + quiet_rows(30, 2029.0))
+    assert result.trades == []
+    assert [(o.outcome, o.reason) for o in result.outcomes] == [
+        (Outcome.NO_TRIGGER, "no M1 turn inside the gap in time")
+    ]
+
+
+def quiet_rows(count: int, price: float) -> list[Row]:
+    return [(price, price + 0.1, price - 0.1, price)] * count
+
+
 def test_order_cancelled_when_tp1_comes_first(base_signal: Signal) -> None:
     runaway: Row = (2030.0, 2033.5, 2029.9, 2033.2)
     result = simulate([QUIET, runaway, FILL], [make_signal(base_signal)])

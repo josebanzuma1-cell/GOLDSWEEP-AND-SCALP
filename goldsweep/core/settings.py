@@ -284,6 +284,33 @@ class ScoringConfig(_StrictModel):
         return self
 
 
+class RefinementConfig(_StrictModel):
+    """Phase 9 stage 2 (D83): "sniper" entries refined on one-minute bars.
+
+    With ``mode: m1`` an M5 setup is not traded at once: the bot waits for price
+    to come back into the setup's gap and turn there on M1, then enters with a
+    stop beyond that turn. The M5 targets stay, so the R:R grows.
+    """
+
+    mode: Literal["none", "m1"] = "none"
+    #: The M1 turn: a close through the last M1 swing high before the pullback's
+    #: low (choch), or through the open of the down-closing run into it (cisd).
+    confirm: Literal["choch", "cisd"] = "choch"
+    #: market: at the close of the turning bar. fvg_mid: a limit at the middle of
+    #: the M1 gap the turn left (market when it left none).
+    entry: Literal["market", "fvg_mid"] = "market"
+    #: M1 bars each side that make a swing point.
+    swing_lookback: int = Field(default=2, ge=1, le=10)
+    #: Stop beyond the pullback's extreme by this many M1 ATRs (plus the spread).
+    sl_buffer_atr: float = Field(default=0.2, ge=0, le=5)
+    #: The stop is never closer than this many spreads, nor than ``min_stop_atr``
+    #: M1 ATRs, so the spread and slippage cannot take most of the risk.
+    min_stop_spreads: float = Field(default=4.0, ge=0, le=100)
+    min_stop_atr: float = Field(default=1.0, ge=0, le=20)
+    #: How many M1 bars a fvg_mid limit waits after the turn.
+    entry_wait_bars: int = Field(default=10, ge=1, le=240)
+
+
 class StrategyConfig(_StrictModel):
     """Spec section 5 thresholds, used by the analysis engine."""
 
@@ -318,6 +345,7 @@ class StrategyConfig(_StrictModel):
     bias: BiasConfig = BiasConfig()
     crt: CrtConfig = CrtConfig()
     scoring: ScoringConfig = ScoringConfig()
+    refinement: RefinementConfig = RefinementConfig()
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:

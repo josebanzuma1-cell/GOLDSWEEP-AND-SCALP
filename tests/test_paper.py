@@ -7,6 +7,7 @@ gives one long at 2028.90 that fills, reaches TP1 and then TP2.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import io
 import json
@@ -324,6 +325,86 @@ def test_an_entry_is_withdrawn_when_a_release_appears_later(
     (gone,) = [m for m in h.notes.sent if m.startswith("⌛")]
     assert gone.endswith("entry order withdrawn before the news blackout for USD Core CPI m/m")
     assert h.trader.executor.pending_orders == []
+
+
+# --------------------------------------------------------------------------- #
+# M1 refinement: "sniper" entries (Phase 9, D83)
+# --------------------------------------------------------------------------- #
+
+
+def refining(settings: Settings) -> Settings:
+    from goldsweep.core.settings import RefinementConfig
+
+    strategy = settings.config.strategy.model_copy(
+        update={"refinement": RefinementConfig(mode="m1")}
+    )
+    return dataclasses.replace(
+        settings, config=settings.config.model_copy(update={"strategy": strategy})
+    )
+
+
+def test_refinement_arms_the_setup_then_trades_the_m1_turn(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import goldsweep.live as live
+    from goldsweep.analysis.refine import RefineResult, RefineStatus
+
+    h = Harness(refining(settings), db)
+    h.run_until(utc(2026, 11, 17, 7, 55))
+    (alert,) = h.notes.sent
+    assert alert.startswith("🟡 XAUUSD LONG setup (score 81.1)")
+    assert "Action: waiting for an M1 turn inside the gap until 09:55 UTC" in alert
+    assert h.trader.executor.pending_orders == []  # nothing is placed before the turn
+    assert db.query("SELECT action FROM signals") == [("armed",)]
+    assert "Waiting for an M1 entry: 2026-11-17-LDN-01 until 09:55 UTC" in h.trader.status()
+    restarted = h.make()  # a restart keeps the armed setup
+    assert "Waiting for an M1 entry" in restarted.status()
+
+    turn = RefineResult(
+        RefineStatus.READY, "M1 turn", utc(2026, 11, 17, 8, 6), "market", 2029.6, 2028.4
+    )
+    monkeypatch.setattr(live, "refine", lambda *_args, **_kwargs: turn)
+    h.clock.set(utc(2026, 11, 17, 8, 6, 2))
+    h.trader.refine_tick()
+    sniper = next(m for m in h.notes.sent if m.startswith("🎯"))
+    assert sniper.startswith("🎯 XAUUSD LONG sniper entry (M1) — 2026-11-17-LDN-01")
+    assert "Entry: 2029.60 (market) | SL: 2028.40 (M5 stop was 2026.09)" in sniper
+    assert "R:R 5.3 | Risk 0.5%" in sniper
+    assert "Action: paper market order at the next open" in sniper
+    assert [plan.stop_loss for plan in h.trader.executor.pending_orders] == [2028.4]
+    assert db.query("SELECT action, stop_loss FROM signals") == [("traded", 2028.4)]
+    assert "Waiting for an M1 entry" not in h.trader.status()
+
+
+def test_an_armed_setup_without_a_turn_is_dropped(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import goldsweep.live as live
+    from goldsweep.analysis.refine import RefineResult, RefineStatus
+
+    h = Harness(refining(settings), db)
+    h.run_until(utc(2026, 11, 17, 7, 55))
+    waiting = RefineResult(RefineStatus.WAITING, "waiting for the turn")
+    monkeypatch.setattr(live, "refine", lambda *_args, **_kwargs: waiting)
+    h.clock.set(utc(2026, 11, 17, 8, 30, 2))
+    h.trader.refine_tick()
+    assert not [m for m in h.notes.sent if m.startswith("⌛")]  # still waiting
+    h.clock.set(utc(2026, 11, 17, 10, 1, 2))  # past 09:55 and the grace minutes
+    h.trader.refine_tick()
+    (dropped,) = [m for m in h.notes.sent if m.startswith("⌛")]
+    assert dropped == (
+        "⌛ PAPER LONG 2026-11-17-LDN-01: no sniper entry (no M1 turn inside the gap in time)"
+    )
+    assert db.query("SELECT action FROM signals") == [("no_trigger",)]
+    assert h.trader.executor.pending_orders == []
+
+
+def test_the_kill_switch_drops_armed_setups(settings: Settings, db: Database) -> None:
+    h = Harness(refining(settings), db)
+    h.run_until(utc(2026, 11, 17, 7, 55))
+    assert "Waiting for an M1 entry" in h.trader.status()
+    h.trader.handle(Command("stop", "", 1))
+    assert "Waiting for an M1 entry" not in h.trader.status()
 
 
 def test_scenario_brief_when_the_market_is_known(settings: Settings, db: Database) -> None:

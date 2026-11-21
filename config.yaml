@@ -78,6 +78,15 @@ strategy:
     enabled: true
     timeframe: H4              # H1 or H4, anchored to the 17:00 New York close
     max_age_candles: 2
+  refinement:                  # M1 "sniper" entries (D83): wait for an M1 turn inside the gap
+    mode: none                 # none (trade the M5 setup as it is) | m1
+    confirm: choch             # choch (close through the last M1 lower high) | cisd
+    entry: market              # market (at the turn) | fvg_mid (limit in the M1 gap)
+    swing_lookback: 2          # M1 bars each side of a swing point
+    sl_buffer_atr: 0.2         # stop beyond the pullback's extreme, in M1 ATRs (+ spread)
+    min_stop_spreads: 4        # the stop is never closer than 4 spreads ...
+    min_stop_atr: 1.0          # ... nor than 1 M1 ATR
+    entry_wait_bars: 10        # how long a fvg_mid limit waits, in M1 bars
   scoring:                     # points per component; must add up to 100
     sweep_quality: 20
     displacement: 15

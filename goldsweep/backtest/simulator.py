@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import heapq
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -49,6 +50,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
+from goldsweep.analysis.refine import M1Refinement, RefineSetup, RefineStatus
 from goldsweep.analysis.structure import swing_indices
 from goldsweep.core.clock import SessionCalculator, ensure_utc
 from goldsweep.core.types import Timeframe
@@ -62,6 +64,7 @@ from goldsweep.execution.book import (
     Trade,
     TradeBook,
     TradePlan,
+    refined_plan,
     to_ns,
 )
 from goldsweep.risk.risk_manager import HIGH_IMPACT, NewsEvent
@@ -256,6 +259,7 @@ class Simulator:
         events: Sequence[NewsEvent] = (),
         sessions: SessionCalculator | None = None,
         entry_lifetime: dt.timedelta | None = None,
+        refinement: M1Refinement | None = None,
     ) -> None:
         """``sessions``: when given, a waiting entry is withdrawn before the next news
         blackout, rollover block, Friday cutoff or weekend (``entry_deadline``), as in
@@ -263,7 +267,12 @@ class Simulator:
 
         ``entry_lifetime``: how long a limit entry waits, measured from the signal
         (``entry_expiry_bars`` x the trigger bar). ``None`` keeps each signal's own
-        ``expires_at``; cached signals may have been made under another setting."""
+        ``expires_at``; cached signals may have been made under another setting.
+
+        ``refinement``: when given, a selected setup is not traded as it is: the
+        order is the M1-refined one, placed when the turn inside the gap closed
+        (D83); a setup whose turn never comes is not traded (``no_trigger``)."""
+        self._refinement = refinement
         self._series = series
         self._spec = spec
         self._risk_cfg = risk
@@ -331,13 +340,18 @@ class Simulator:
             return result
 
         next_signal = 0
+        # M1 refinement (D83): orders whose turn has been found, placed when it closed.
+        refined: list[tuple[int, int, SignalRecord, TradePlan]] = []
         i = int(np.searchsorted(series.close_ns, to_ns(queue[0].time), side="left"))
         while i < len(series):
             if book.idle:
-                if next_signal >= len(queue):
+                upcoming = [to_ns(queue[next_signal].time)] if next_signal < len(queue) else []
+                if refined:
+                    upcoming.append(refined[0][0])
+                if not upcoming:
                     break
-                # Nothing to manage: jump to the bar at whose close the next signal arrives.
-                i = max(i, int(np.searchsorted(series.close_ns, to_ns(queue[next_signal].time))))
+                # Nothing to manage: jump to the bar at whose close the next one arrives.
+                i = max(i, int(np.searchsorted(series.close_ns, min(upcoming))))
                 if i >= len(series):
                     break
             bar = self._bar(i)
@@ -351,26 +365,32 @@ class Simulator:
                 if passed_over is not None:
                     result.outcomes.append(SignalOutcome(record, Outcome.NOT_SELECTED, passed_over))
                     continue
-                plan = TradePlan.from_signal(record.signal, tp3_r=self._risk_cfg.tp3_r)
-                span = lifetime(record) if lifetime is not None else self._lifetime
-                if span is not None and plan.entry_mode != "market":
-                    plan = dataclasses.replace(plan, expires_at=plan.time + span)
-                if self._sessions is not None:
-                    plan = plan.with_deadline(
-                        sessions=self._sessions,
-                        events=self._events,
-                        blackout_before_min=self._news.blackout_before_min,
+                plan = self._plan(record, lifetime)
+                if self._refinement is None:
+                    self._submit(book, record, plan, result)
+                    continue
+                setup = RefineSetup.from_signal(record.signal, expires_at=plan.expires_at)
+                decision = self._refinement.decide(setup)
+                if decision.status is not RefineStatus.READY:
+                    outcome = (
+                        Outcome.TP1_FIRST
+                        if decision.status is RefineStatus.TP1_FIRST
+                        else (Outcome.NO_TRIGGER)
                     )
-                event = book.submit(
-                    plan,
-                    record,
-                    spread_points=record.spread_points,
-                    median_spread_points=record.median_spread_points,
-                    events=self._events,
+                    result.outcomes.append(SignalOutcome(record, outcome, decision.detail))
+                    continue
+                order = self._with_deadline(
+                    refined_plan(setup, decision, tp3_r=self._risk_cfg.tp3_r)
                 )
-                if event.kind is EventKind.REJECTED and event.outcome is not None:
-                    result.outcomes.append(SignalOutcome(record, event.outcome, event.detail))
+                heapq.heappush(refined, (to_ns(order.time), next_signal, record, order))
+            while refined and refined[0][0] <= close_ns:
+                _when, _n, record, order = heapq.heappop(refined)
+                self._submit(book, record, order, result)
             i += 1
+        for _when, _n, record, _order in refined:
+            result.outcomes.append(
+                SignalOutcome(record, Outcome.EXPIRED, "the data ended before the order")
+            )
 
         last = self._bar(len(series) - 1)
         self._collect(
@@ -387,6 +407,40 @@ class Simulator:
         result.trades.sort(key=lambda trade: trade.fill_time)
         result.final_equity = book.manager.equity
         return result
+
+    def _with_deadline(self, plan: TradePlan) -> TradePlan:
+        if self._sessions is None:
+            return plan
+        return plan.with_deadline(
+            sessions=self._sessions,
+            events=self._events,
+            blackout_before_min=self._news.blackout_before_min,
+        )
+
+    def _plan(
+        self,
+        record: SignalRecord,
+        lifetime: Callable[[SignalRecord], dt.timedelta | None] | None,
+    ) -> TradePlan:
+        """The signal's order: its configured lifetime, cut before any blocked time."""
+        plan = TradePlan.from_signal(record.signal, tp3_r=self._risk_cfg.tp3_r)
+        span = lifetime(record) if lifetime is not None else self._lifetime
+        if span is not None and plan.entry_mode != "market":
+            plan = dataclasses.replace(plan, expires_at=plan.time + span)
+        return self._with_deadline(plan)
+
+    def _submit(
+        self, book: TradeBook, record: SignalRecord, plan: TradePlan, result: SimulationResult
+    ) -> None:
+        event = book.submit(
+            plan,
+            record,
+            spread_points=record.spread_points,
+            median_spread_points=record.median_spread_points,
+            events=self._events,
+        )
+        if event.kind is EventKind.REJECTED and event.outcome is not None:
+            result.outcomes.append(SignalOutcome(record, event.outcome, event.detail))
 
     def _protect_before_news(self, book: TradeBook, bar: Bar) -> None:
         min_r = self._news.breakeven_before_news_r
