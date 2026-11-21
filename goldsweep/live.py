@@ -7,15 +7,19 @@ On every closed M5 bar (read a couple of seconds after the close):
    the MT5 executor, which follows the broker and moves real stops;
 2. the signal engine looks at the closed bars, with the news bias and the
    post-news windows;
-3. each signal is numbered, stored and judged: at or above the auto-trade
-   threshold it becomes an order (if the risk rules allow), at or above the
-   alert threshold it is an alert, below that it is only stored;
+3. each signal is numbered, graded, stored and judged: when it meets its
+   session's playbook rule (D86) and clears the auto-trade threshold it becomes
+   an order (if the risk rules allow), at or above the alert threshold it is an
+   alert, below that it is only stored. A setup that meets the session's A+
+   candidate, not yet approved, is also traded on the shadow book (paper only,
+   D87); once enough of those have finished with a positive average, the owner
+   is asked to send ``/approve <session>``;
 4. ``signals.json`` is rewritten for the on-chart panel.
 
 Alongside run the news refresh (calendar, headlines, AI classification), the
 pre-news warnings and breakeven moves, the scenario briefs, the Telegram
-commands (/status /pause /resume /stop) and the daily summary at 21:00 New
-York time. LIVE also compares orders and positions with the broker every few
+commands (/status /pause /resume /stop /golive /approve /revoke) and the daily
+summary at 21:00 New York time. LIVE also compares orders and positions with the broker every few
 seconds, so fills, targets, stops and breakeven moves are reported at once.
 Every step is serialised by one lock: the MetaTrader 5 Python API is not
 thread-safe.
@@ -46,6 +50,15 @@ from goldsweep.alerts import messages
 from goldsweep.alerts.telegram import Command, Notifier, TelegramBot, make_notifier
 from goldsweep.analysis.bias import compute_bias
 from goldsweep.analysis.context import ContextFrames, with_context
+from goldsweep.analysis.grades import (
+    PLAYBOOK_SESSIONS,
+    describe_rule,
+    grade,
+    meets,
+    parse_playbook,
+    playbook_name,
+    playbook_session,
+)
 from goldsweep.analysis.indicators import latest_atr
 from goldsweep.analysis.pressure import STRUCTURE_BARS, PressureReading, pressure_meter
 from goldsweep.analysis.refine import (
@@ -61,7 +74,7 @@ from goldsweep.backtest.engine import spread_points as cost_spreads
 from goldsweep.backtest.simulator import TrailLevels
 from goldsweep.core.clock import UTC, Clock, SessionCalculator, SystemClock, ensure_utc
 from goldsweep.core.logging import get_logger, setup_logging, shutdown_logging
-from goldsweep.core.settings import Settings
+from goldsweep.core.settings import PlaybookRule, Settings
 from goldsweep.core.types import Mode, Timeframe
 from goldsweep.data.broker import BrokerClient, BrokerError
 from goldsweep.data.calendar import CalendarService, EconomicEvent, is_blackout_event
@@ -70,6 +83,7 @@ from goldsweep.data.news import NewsService
 from goldsweep.execution.book import Bar, BookEvent, EventKind, TradePlan, refined_plan, to_ns
 from goldsweep.execution.executor import Executor, PaperExecutor
 from goldsweep.execution.panel import PanelWriter
+from goldsweep.execution.shadow import ShadowBook, Tally, fingerprint
 from goldsweep.risk.risk_manager import NewsEvent
 from goldsweep.storage.db import Database
 
@@ -99,6 +113,12 @@ REFINE_GRACE = dt.timedelta(minutes=5)
 #: H1 bars read for the trend and structure context tags (D86): enough for the
 #: 200 EMA, the daily structure and the previous week.
 CONTEXT_HOURS = 2000
+#: Session playbooks (D87): the candidates the owner approved ({playbook: rule
+#: fingerprint}) and those whose approval was already asked for. Shared by paper and
+#: live, like the shadow book: monitoring never trades, and an approval is the owner's
+#: decision about a strategy, not about one mode.
+APPROVED_KEY = "playbooks.approved"
+ASKED_KEY = "playbooks.asked"
 MEDIAN_SPREAD_MIN_SAMPLES = 30
 EXIT_OK, EXIT_BROKER, EXIT_REFUSED, EXIT_NOT_CONFIRMED = 0, 1, 2, 3
 
@@ -240,6 +260,8 @@ class Trader:
             if name != "sweep_mss" and getattr(self._config.models, name).enabled
         }
         self._silver = self._resolve_silver(broker)
+        #: Monitored A+ setups, traded on paper only (D87).
+        self._shadow = ShadowBook(settings, self.spec, db)
         saved = db.get_state(self._state_last_bar)
         self._last_bar = dt.datetime.fromisoformat(saved) if saved else None
         self._market: dict[str, Any] = {}
@@ -372,6 +394,7 @@ class Trader:
                 float(spreads[i]),
             )
             self._report(self.executor.on_bar(bar, trail))
+            self._monitor_bar(bar, trail)
 
         # 2. Each model's engine looks for setups that completed at this close (D85).
         signals: list[Signal] = []
@@ -577,16 +600,8 @@ class Trader:
             action, text = "alert", f"alert only: trading is {self.trading}"
         elif not execution.auto_trade:
             action, text = "alert", "alert only: auto_trade is off"
-        elif not getattr(self._config.models, signal.model).trade:
-            action, text = (
-                "alert",
-                f"alert only: the {messages.model_name(signal.model)} model does not trade yet",
-            )
-        elif not signal.meets_auto_trade:
-            action, text = (
-                "alert",
-                f"alert only: score below the auto-trade threshold {signal.auto_trade_threshold:g}",
-            )
+        elif (refusal := self._playbook_refusal(signal)) is not None:
+            action, text = "alert", f"alert only: {refusal}"
         elif self._config.strategy.refinement.mode == "m1":
             # D83: no order yet; the refine job waits for the M1 turn inside the gap.
             self._save_armed(
@@ -606,10 +621,16 @@ class Trader:
                 follow_up = self.executor.sync(now)  # a market order fills at once
             else:
                 blocked, action, text = True, "blocked", f"blocked: {event.detail}"
+        monitoring = None
+        if action not in ("below_alert", "duplicate"):
+            monitoring = self._monitor(signal, plan, spread, median, blackouts)
+        grade_text = self._grade_text(signal)
         pressure = self._pressure(
             self._market.get("hourly", pd.DataFrame()), bias.score if bias else 0.0
         )
-        self._store_signal(signal, action, text, pressure, plan)
+        self._store_signal(
+            signal, action, text, pressure, plan, grade=grade_text, monitoring=monitoring
+        )
         log.info("signal", id=signal.id, action=action, detail=text, score=signal.score)
         if action in ("below_alert", "duplicate") or (
             blocked and not self._config.alerts.send_blocked
@@ -630,6 +651,8 @@ class Trader:
                 mode=self.label,
                 take_profit_3=plan.take_profit_3,
                 plan=plan,
+                grade=grade_text,
+                monitoring=monitoring,
             )
         )
         self._report(follow_up)
@@ -642,6 +665,9 @@ class Trader:
         text: str,
         pressure: PressureReading | None,
         plan: TradePlan,
+        *,
+        grade: str | None = None,
+        monitoring: str | None = None,
     ) -> None:
         detail = {
             "pool": signal.pool.label,
@@ -654,6 +680,8 @@ class Trader:
             "mode": self.label,
             "model": signal.model,
             "tags": list(signal.tags),
+            "grade": grade,
+            "monitoring": monitoring,
         }
         self._db.execute(
             "INSERT OR REPLACE INTO signals (id, time, direction, session, score, entry, "
@@ -674,6 +702,204 @@ class Trader:
                 json.dumps(detail),
             ),
         )
+
+    # -- session playbooks and monitoring (D86, D87) ---------------------------------- #
+
+    def _neutral_extra(self) -> float:
+        return self._config.strategy.bias.neutral_extra_score
+
+    def _candidate(self, playbook: str) -> PlaybookRule | None:
+        rule: PlaybookRule | None = getattr(self._config.playbooks, playbook).candidate
+        return rule
+
+    def _approved_rule(self, playbook: str) -> PlaybookRule | None:
+        """The session's candidate, if the owner approved it exactly as it stands now.
+
+        An approval names the rule's fingerprint, so editing the candidate in
+        config.yaml withdraws the approval and starts its monitoring again.
+        """
+        candidate = self._candidate(playbook)
+        if candidate is None:
+            return None
+        approved = self._db.get_state(APPROVED_KEY, {}).get(playbook)
+        return candidate if approved == fingerprint(candidate) else None
+
+    def _live_rule(self, playbook: str) -> PlaybookRule | None:
+        """What trades for real in a session: the approved candidate, else the trading rule."""
+        approved = self._approved_rule(playbook)
+        if approved is not None:
+            return approved
+        rule: PlaybookRule | None = getattr(self._config.playbooks, playbook).trading
+        return rule
+
+    def _playbook_refusal(self, signal: Signal) -> str | None:
+        """Why ``signal`` may not trade for real, or None when its session's rule takes it."""
+        if not getattr(self._config.models, signal.model).trade:
+            return f"the {messages.model_name(signal.model)} model does not trade yet"
+        if not signal.meets_auto_trade:
+            return f"score below the auto-trade threshold {signal.auto_trade_threshold:g}"
+        playbook = playbook_session(signal.session)
+        if playbook is None:
+            return "no session playbook covers this window"
+        rule = self._live_rule(playbook)
+        name = playbook_name(playbook)
+        if rule is None:
+            return f"the {name} playbook does not trade yet"
+        if not meets(signal, rule, neutral_extra=self._neutral_extra()):
+            return f"outside the {name} playbook ({describe_rule(rule)})"
+        return None
+
+    def _grade_text(self, signal: Signal) -> str:
+        letter = grade(signal, self._config.playbooks, neutral_extra=self._neutral_extra())
+        playbook = playbook_session(signal.session)
+        if letter == "A+" and playbook is not None:
+            return f"A+ ({playbook_name(playbook)} playbook)"
+        return letter
+
+    def _monitor(
+        self,
+        signal: Signal,
+        plan: TradePlan,
+        spread: float,
+        median: float | None,
+        blackouts: Sequence[NewsEvent],
+    ) -> str | None:
+        """A setup that meets a session's candidate, not yet approved, is shadow-traded.
+
+        This happens whether or not the trading rule also took it, so the London and
+        New York candidates are measured too. Nothing is sent to MT5. Returns the
+        line for the alert, or None when the setup is not monitored.
+        """
+        if self.trading == STOPPED:
+            return None
+        playbook = playbook_session(signal.session)
+        if playbook is None:
+            return None
+        candidate = self._candidate(playbook)
+        if candidate is None or self._approved_rule(playbook) is not None:
+            return None
+        if not meets(signal, candidate, neutral_extra=self._neutral_extra()):
+            return None
+        name = playbook_name(playbook)
+        try:
+            event = self._shadow.submit(
+                plan,
+                candidate,
+                spread_points=spread,
+                median_spread_points=median,
+                events=blackouts,
+            )
+            tally = self._shadow.tally(playbook, candidate)
+        except Exception as exc:  # noqa: BLE001 - monitoring must never stop trading
+            log.error("shadow book failed", error=repr(exc), id=signal.id)
+            return None
+        if event.kind is not EventKind.PLACED:
+            return f"A+ for the {name} playbook, not monitored ({event.detail})"
+        needed = self._config.playbooks.monitor_trades
+        return f"monitored for the {name} A+ playbook ({tally.finished} of {needed} finished)"
+
+    def _monitor_bar(self, bar: Bar, trail: TrailLevels) -> None:
+        """The bar moves the monitored setups; finished ones are reported and counted."""
+        try:
+            closed = self._shadow.on_bar(bar, trail)
+        except Exception as exc:  # noqa: BLE001 - monitoring must never stop trading
+            log.error("shadow book failed", error=repr(exc))
+            return
+        needed = self._config.playbooks.monitor_trades
+        for event in closed:
+            playbook = playbook_session(event.plan.session)
+            candidate = self._candidate(playbook) if playbook is not None else None
+            if playbook is None or candidate is None or event.trade is None:
+                continue
+            tally = self._shadow.tally(playbook, candidate)
+            self._send(messages.monitor_result(event.trade, playbook_name(playbook), tally, needed))
+            self._ask_approval(playbook, candidate, tally)
+
+    def _ask_approval(self, playbook: str, candidate: PlaybookRule, tally: Tally) -> None:
+        """Once per candidate: enough monitored trades with a positive average."""
+        if not tally.confirmed(self._config.playbooks.monitor_trades):
+            return
+        if self._approved_rule(playbook) is not None:
+            return
+        asked = dict(self._db.get_state(ASKED_KEY, {}))
+        key = fingerprint(candidate)
+        if asked.get(playbook) == key:
+            return
+        self._send(
+            messages.approval_request(
+                playbook, playbook_name(playbook), describe_rule(candidate), tally
+            )
+        )
+        asked[playbook] = key
+        self._db.set_state(ASKED_KEY, asked)
+
+    def _approve(self, argument: str) -> str:
+        """``/approve <session>``: a confirmed candidate trades through the executor."""
+        playbook = parse_playbook(argument)
+        if playbook is None:
+            return "Send /approve asia, /approve london or /approve newyork."
+        name = playbook_name(playbook)
+        candidate = self._candidate(playbook)
+        if candidate is None:
+            return f"The {name} playbook has no A+ candidate to approve."
+        if self._approved_rule(playbook) is not None:
+            return f"The {name} A+ playbook is already approved and trading."
+        needed = self._config.playbooks.monitor_trades
+        tally = self._shadow.tally(playbook, candidate)
+        if not tally.confirmed(needed):
+            return (
+                f"Not approved: the {name} A+ playbook needs {needed} finished monitored "
+                f"trades with a positive average. So far: {messages.tally_text(tally)}."
+            )
+        approved = dict(self._db.get_state(APPROVED_KEY, {}))
+        approved[playbook] = fingerprint(candidate)
+        self._db.set_state(APPROVED_KEY, approved)
+        log.info("playbook approved", playbook=playbook, rule=describe_rule(candidate))
+        note = ""
+        if not getattr(self._config.models, candidate.model).trade:
+            note = (
+                f" Note: models.{candidate.model}.trade is false in config.yaml, so its "
+                "setups still alert only."
+            )
+        return (
+            f"✅ {name} A+ playbook approved: {describe_rule(candidate)}. From now on only "
+            f"these setups trade in the {name} session ({messages.tally_text(tally)} in "
+            f"monitoring). /revoke {playbook} undoes it.{note}"
+        )
+
+    def _revoke(self, argument: str) -> str:
+        """``/revoke <session>``: back to the trading rule; the candidate is monitored again."""
+        playbook = parse_playbook(argument)
+        if playbook is None:
+            return "Send /revoke asia, /revoke london or /revoke newyork."
+        name = playbook_name(playbook)
+        approved = dict(self._db.get_state(APPROVED_KEY, {}))
+        if approved.pop(playbook, None) is None:
+            return f"The {name} A+ playbook was not approved: nothing to revoke."
+        self._db.set_state(APPROVED_KEY, approved)
+        log.info("playbook approval revoked", playbook=playbook)
+        trading = getattr(self._config.playbooks, playbook).trading
+        now = describe_rule(trading) if trading is not None else "no trading rule (alerts only)"
+        return f"↩️ {name} A+ playbook approval revoked. The {name} session now uses: {now}."
+
+    def _playbook_lines(self) -> list[str]:
+        """One line per session for /status."""
+        needed = self._config.playbooks.monitor_trades
+        lines = ["Playbooks:"]
+        for playbook in PLAYBOOK_SESSIONS:
+            name = playbook_name(playbook)
+            live = self._live_rule(playbook)
+            trades = describe_rule(live) if live is not None else "alerts only"
+            candidate = self._candidate(playbook)
+            if candidate is None:
+                state = "no A+ candidate"
+            elif self._approved_rule(playbook) is not None:
+                state = "A+ candidate approved"
+            else:
+                tally = self._shadow.tally(playbook, candidate)
+                state = f"A+ candidate monitored: {messages.tally_text(tally)} (needs {needed})"
+            lines.append(f"• {name}: trades {trades} | {state}")
+        return lines
 
     # -- M1 refinement: "sniper" entries (D83) ------------------------------------------ #
 
@@ -802,6 +1028,10 @@ class Trader:
         with self._lock:
             if command.name == "golive":
                 reply = self._go_live(command.argument)
+            elif command.name == "approve":
+                reply = self._approve(command.argument)
+            elif command.name == "revoke":
+                reply = self._revoke(command.argument)
             else:
                 reply = self._handle(command.name)
             if command.name in ("pause", "resume", "stop", "golive"):
@@ -932,6 +1162,7 @@ class Trader:
         now = ensure_utc(self._clock.now())
         self._set_trading(STOPPED)  # first: nothing new may start while closing
         self._save_armed([])  # setups waiting for an M1 entry are dropped too
+        self._shadow.clear(now)  # and the monitored ones (D87): nothing of them is counted
         tick = self._broker.get_tick(self.spec.name)
         events = self.executor.close_everything(now, tick.bid, tick.ask, "kill switch (/stop)")
         self._report(events)
@@ -972,6 +1203,10 @@ class Trader:
         if armed:
             waiting = ", ".join(f"{s.id} until {s.expires_at:%H:%M} UTC" for s in armed)
             text += f"\nWaiting for an M1 entry: {waiting}"
+        text += "\n" + "\n".join(self._playbook_lines())
+        monitored = [p.id for p in self._shadow.orders] + [p["id"] for p in self._shadow.positions]
+        if monitored:
+            text += f"\nMonitored now (paper only): {', '.join(monitored)}"
         return text
 
     # -- news, warnings, scenarios, summary ---------------------------------------- #

@@ -30,7 +30,7 @@ review after each one.
 | 7 | Streamlit dashboard: chart, scenarios, news, trades, risk, equity, backtests, kill switch | built, tested, approved |
 | 8 | Unattended running (Task Scheduler, /golive), heartbeat, watchdog, backups, VPS guide | built, tested, approved |
 | 9 | More trades and "sniper" entries: (1) entries that fill and never wait into a blocked time, (2) M1 refinement, (3) more setup models | built and tested: entries wait 2 hours (D82), M1 refinement left off (D83), breakeven only at TP1 (D84), new models alert only (D85) |
-| 10 | Session playbooks: A+ grades, per-session strategy from the evidence, monitoring before auto-trading | stage 1 (analysis and candidates, D86) built and tested, awaiting approval; stage 2 (monitoring, `/approve`) next |
+| 10 | Session playbooks: A+ grades, per-session strategy from the evidence, monitoring before auto-trading | stage 1 (analysis and candidates, D86) approved; stage 2 (shadow-book monitoring, `/approve`, Asia on, D87) built and tested, awaiting approval |
 
 Only `python main.py --live` sends orders to a broker, and only after
 `MODE=LIVE` in `.env`, `mode: LIVE` in `config.yaml` and the account number typed
@@ -82,6 +82,17 @@ best on the first two-thirds of the history and also positive on the last third.
 On 2024-2026 that gave London and New York the same A+ rule (the current model
 with the Judas tag) and Asia none. A candidate is monitored before it may trade.
 
+**Monitoring and approval (D87).** Every alert carries its grade (A+, A or B). A
+setup that meets its session's candidate is also traded on a *shadow book*: on
+paper only, by the same rules as every other trade, never sent to MetaTrader 5.
+Each finished monitored trade is reported with the running tally. After 20 have
+finished with a positive average, Telegram asks the owner to send
+`/approve <session>`; from then on only that session's A+ setups trade there.
+`/revoke <session>` undoes it, and editing a candidate in `config.yaml` starts its
+count again. The Asian session is switched on: its setups are graded and alerted,
+and nothing trades there until it has a candidate that passes monitoring.
+`/status` shows each session's playbook and tally.
+
 A score measures how complete a setup is, not how likely it is to win. Every
 setup can lose; the stop-loss is what keeps that loss small. The choices made
 here are explained in `DECISIONS.md` (D16-D25).
@@ -92,7 +103,12 @@ here are explained in `DECISIONS.md` (D16-D25).
 python -m goldsweep.backtest --from 2024-01-01 --to 2026-10-31             # real history
 python -m goldsweep.backtest --from 2024-01-01 --to 2026-10-31 --with-m1   # plus M1 fills
 python -m goldsweep.backtest --from 2026-01-05 --to 2026-01-30 --mock      # synthetic
+python -m goldsweep.backtest --from 2024-01-01 --to 2026-10-31 --candidates  # the A+ playbooks as if approved
 ```
+
+A backtest trades what the session playbooks trade (D87): setups outside a
+session's trading rule are recorded as not selected. `--candidates` trades each
+session's A+ candidate instead, to compare.
 
 The first run downloads the M5 history from MetaTrader 5 into the SQLite
 database (the terminal must be open and logged in); later runs use the stored
@@ -106,7 +122,7 @@ took 9 seconds. The report goes to `reports/backtest_<from>_<to>/`:
 
 | File | Holds |
 |---|---|
-| `report.html` | Headline figures, equity curve, results by session, weekday, direction and pressure meter, the walk-forward windows, every trade, and what the test cannot see |
+| `report.html` | Headline figures, equity curve, the session playbooks traded, results by playbook, session, weekday, direction and pressure meter, the walk-forward windows, every trade, and what the test cannot see |
 | `trades.csv` | One row per trade: entry, exits, lots, costs, result in money and in R |
 | `signals.csv` | Every signal and what happened to it (traded, below threshold, blocked by a risk rule, expired, ...) |
 | `equity.csv`, `walk_forward_trades.csv`, `summary.json` | Equity after each trade, the out-of-sample trades, and every figure as JSON |
@@ -211,10 +227,12 @@ The bot answers only that chat:
 
 | Command | Does |
 |---|---|
-| `/status` | trading state, equity, open positions and orders, today's result, news bias |
+| `/status` | trading state, equity, open positions and orders, today's result, news bias, each session's playbook and monitoring tally |
 | `/pause` | no new trades; open trades are still managed |
 | `/resume` | trade again |
-| `/stop` | **kill switch**: cancels every order, closes every paper position, stops trading until `/resume` |
+| `/stop` | **kill switch**: cancels every order, closes every paper position, clears the monitored setups, stops trading until `/resume` |
+| `/approve <session>` | after its monitoring is confirmed, the session (`asia`, `london`, `newyork`) trades only its A+ playbook (D87) |
+| `/revoke <session>` | back to the session's trading rule; its A+ candidate is monitored again |
 | `/help` | the list |
 
 An alert looks like this:

@@ -104,6 +104,15 @@ XAUUSD-only trading assistant. The full specification is `docs/SPEC.md`
   New York day. `python -m goldsweep.playbook` picks candidates: chosen on the first
   two-thirds, positive on the held-out third, at least 15 trades. A candidate is
   monitored before it may trade; never switch one to trading without the owner.
+- **Monitoring** (D87): `live.py` trades a setup for real only when its session's
+  live rule takes it (the approved candidate, else `trading`; `models.<name>.trade`
+  and the auto-trade threshold still apply). Setups that meet an unapproved
+  candidate also go on the shadow book (`execution/shadow.py`, table
+  `shadow_trades`): paper only, never sent to MT5, cleared by the kill switch.
+  Approvals (`/approve <session>`, state `playbooks.approved`) name the candidate's
+  fingerprint, so editing a candidate withdraws its approval. Backtests trade the
+  playbooks too (`split_by_playbook` in `backtest/engine.py`; `--candidates` trades
+  the candidates as if approved).
 - **Only `execution/mt5_gateway.py` sends orders.** Tests drive it with
   `tests/fake_mt5_trading.py` (a fake trade server); never send orders from tests.
   Real-terminal checks use `order_check` only, which validates without trading.
@@ -130,6 +139,7 @@ python main.py --check --mock    environment report, offline
 python main.py --check           environment report against MetaTrader 5
 python -m goldsweep.backtest --from 2024-01-01 --to 2026-10-31   backtest report
 python -m goldsweep.backtest --from 2026-01-05 --to 2026-01-30 --mock   offline
+python -m goldsweep.backtest --from 2024-01-01 --to 2026-10-31 --candidates   A+ playbooks as if approved
 python main.py --news [--no-llm] [--mock]   calendar, headlines, news bias, scenarios
 python main.py --paper [--mock] [--no-llm]  paper trading loop (Ctrl+C stops it)
 python main.py --live [--no-llm]            live trading (MODE=LIVE + mode: LIVE + typed confirmation)

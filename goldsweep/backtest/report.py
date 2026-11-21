@@ -153,6 +153,8 @@ def summary_json(result: BacktestResult, command: str) -> dict[str, object]:
         "fingerprints": result.fingerprints,
         "signals": len(result.records),
         "signal_outcomes": dict(sorted(outcome_counts.items())),
+        "playbooks": result.playbooks,
+        "candidates": result.candidates,
         "metrics": _metrics_json(result.metrics),
         "breakdowns": {
             name: {str(key): _metrics_json(value) for key, value in groups.items()}
@@ -385,6 +387,19 @@ def render_html(result: BacktestResult, command: str) -> str:
             f"<ul>{items}</ul></div>"
         )
     parts.append("<h2>The configured strategy, whole period</h2>")
+    if result.playbooks:
+        which = (
+            "the A+ candidates, traded as if approved (--candidates)"
+            if result.candidates
+            else "the trading rules"
+        )
+        items = "".join(
+            f"<li>{_e(name)}: {_e(rule)}</li>" for name, rule in result.playbooks.items()
+        )
+        parts.append(
+            f"<p>Session playbooks (D87), {_e(which)}; other setups are not traded:</p>"
+            f"<ul>{items}</ul>"
+        )
     parts.append(_tiles(metrics, currency))
     parts.append(equity_svg(equity_points(result.result.trades, balance, result.start), balance))
     outcome_counts = Counter(item.outcome.value for item in result.result.outcomes)
@@ -394,6 +409,7 @@ def render_html(result: BacktestResult, command: str) -> str:
         + ".</p>"
     )
     titles = {
+        "playbook": "By session playbook (D87)",
         "session": "By session",
         "weekday": "By weekday",
         "direction": "By direction",

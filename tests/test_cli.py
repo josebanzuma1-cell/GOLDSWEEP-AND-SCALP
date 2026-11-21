@@ -98,7 +98,7 @@ def test_session_table_in_utc_and_kampala_time(settings: Settings) -> None:
         "09:00-15:00 Asia/Tokyo",
         "00:00-06:00",
         "03:00-09:00",
-        "off (range only)",
+        "on",  # the owner switched Asia on (D87); its playbook decides what trades
     ]
     assert cells(text, "London kill zone") == [
         "London kill zone",
@@ -160,7 +160,8 @@ def test_weekend_report_uses_the_local_date_and_says_the_market_is_closed(
         "CLOSED (weekend); reopens Sun 2026-11-15 23:00 UTC = Mon 2026-11-16 02:00 Africa/Kampala"
     )
     assert value(text, "New trades").startswith("NOT allowed now: weekend: market closed")
-    assert value(text, "Next window").startswith("London kill zone opens Mon 2026-11-16 07:00 UTC")
+    # Asia is on (D87): Monday's first window is Tokyo's, 09:00 local = 00:00 UTC.
+    assert value(text, "Next window").startswith("Asia / Tokyo opens Mon 2026-11-16 00:00 UTC")
     # The mock still serves Friday's last closed bar.
     assert value(text, "Last M5 bar").startswith("opened 2026-11-13 21:55 UTC")
 

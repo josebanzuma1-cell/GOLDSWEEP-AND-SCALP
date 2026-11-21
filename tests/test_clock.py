@@ -31,16 +31,37 @@ from goldsweep.core.clock import (
     ensure_utc,
     local_to_utc,
 )
-from goldsweep.core.settings import OverlapConfig, SessionWindow, Settings, TimeWindow
+from goldsweep.core.settings import (
+    OverlapConfig,
+    SessionsConfig,
+    SessionWindow,
+    Settings,
+    TimeWindow,
+)
 from tests.helpers import utc
 
 D = dt.date
 Hm = tuple[int, int]
 
 
+def spec_windows(settings: Settings) -> SessionsConfig:
+    """The shipped windows with Asia as the spec has it: range only, no new trades.
+
+    The owner switched Asia on (D87); these tests pin the calculator's behaviour, so
+    they keep the spec's timetable (test_asia_can_be_switched_on covers Asia on).
+    """
+    windows = settings.config.sessions
+    return windows.model_copy(update={"asia": windows.asia.model_copy(update={"trade": False})})
+
+
+@pytest.fixture
+def sessions(settings: Settings) -> SessionCalculator:
+    return SessionCalculator(spec_windows(settings))
+
+
 def calculator(settings: Settings, **changes: object) -> SessionCalculator:
-    """Session calculator for the shipped config with some session settings replaced."""
-    return SessionCalculator(settings.config.sessions.model_copy(update=changes))
+    """Session calculator for the spec's windows with some session settings replaced."""
+    return SessionCalculator(spec_windows(settings).model_copy(update=changes))
 
 
 # --------------------------------------------------------------------------- #

@@ -108,6 +108,9 @@ def test_signals_trades_and_equity(traded: Harness) -> None:
     assert (row.entry, row.tp1, row.tp2) == (2028.9, 2036.0, 2048.0)
     assert row.tp3 is None  # 3R (2037.33) is not beyond TP2
     assert row.pool and row.what_happened.startswith("paper limit order placed")
+    # D87: London's A+ candidate (a Judas swing) also monitors this setup.
+    assert row.grade == "A+ (London playbook)"
+    assert row.monitoring == "monitored for the London A+ playbook (0 of 20 finished)"
     closed = data.trades(db, live=False)
     assert list(closed["exit"]) == ["tp2"] and closed["parts"].iloc[0] == 2
     curve = data.equity_curve(closed, 10_227.51)

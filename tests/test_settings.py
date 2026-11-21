@@ -84,7 +84,7 @@ def test_shipped_config_matches_the_spec(settings: Settings) -> None:
         "Asia/Tokyo",
         dt.time(9, 0),
         dt.time(15, 0),
-        False,
+        True,  # the spec has False; the owner switched Asia on (D87)
     )
     assert (s.london.tz, s.london.start, s.london.end, s.london.trade) == (
         "Europe/London",
@@ -164,11 +164,16 @@ def test_built_in_defaults_equal_the_shipped_config(settings: Settings, tmp_path
 
     spec_values = {key: spec for key, (spec, _) in OWNER_CHANGES.items()}
     spec_risk = {key: spec for key, (spec, _) in OWNER_RISK_CHANGES.items()}
+    windows = settings.config.sessions
     shipped = settings.config.model_copy(
         update={
             "mode": Mode.PAPER,
             "strategy": settings.config.strategy.model_copy(update=spec_values),
             "risk": settings.config.risk.model_copy(update=spec_risk),
+            # D87: the owner switched Asia on; the spec (and an empty file) has it off.
+            "sessions": windows.model_copy(
+                update={"asia": windows.asia.model_copy(update={"trade": False})}
+            ),
             # The candidates come from the playbook analysis (D86), not from defaults.
             "playbooks": settings.config.playbooks.model_copy(
                 update={

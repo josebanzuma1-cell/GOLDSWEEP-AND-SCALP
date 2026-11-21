@@ -212,6 +212,47 @@ def test_results_by_model_and_by_confluence(settings: Settings, market: MarketDa
     assert len(run.result.trades) == 1  # one raid, one position at a time
 
 
+def test_backtests_trade_the_session_playbooks(settings: Settings, market: MarketData) -> None:
+    """D87: only what a session's rule takes is traded; --candidates trades the A+ rules."""
+    from goldsweep.backtest.engine import OUTSIDE_PLAYBOOKS
+    from goldsweep.core.settings import PlaybookRule, SessionPlaybook
+
+    end = TUESDAY + dt.timedelta(hours=12)
+    result = run_backtest(settings, market, TUESDAY, end, run_walk_forward=False)
+    assert result.playbooks == {
+        "Asia": "none",
+        "London": "sweep_mss, score >= 60",
+        "New York": "sweep_mss, score >= 60",
+    }
+    assert not result.candidates
+    assert list(result.breakdowns["playbook"]) == ["London"]
+
+    candidates = run_backtest(
+        settings, market, TUESDAY, end, run_walk_forward=False, candidates=True
+    )
+    assert candidates.candidates
+    assert candidates.playbooks["London"] == "sweep_mss, score >= 60, with judas"
+    assert len(candidates.result.trades) == 1  # the textbook raid is a Judas swing
+
+    def london(book: SessionPlaybook) -> Settings:
+        playbooks = settings.config.playbooks.model_copy(update={"london": book})
+        return dataclasses.replace(
+            settings, config=settings.config.model_copy(update={"playbooks": playbooks})
+        )
+
+    smt_only = london(SessionPlaybook(trading=PlaybookRule(tags_any=("smt",))))
+    none = run_backtest(smt_only, market, TUESDAY, end, run_walk_forward=False)
+    assert none.result.trades == []
+    assert {(o.outcome, o.reason) for o in none.result.outcomes} == {
+        (Outcome.NOT_SELECTED, OUTSIDE_PLAYBOOKS)
+    }
+    # With --candidates a session without a candidate keeps its trading rule.
+    plain = london(SessionPlaybook(trading=PlaybookRule()))
+    kept = run_backtest(plain, market, TUESDAY, end, run_walk_forward=False, candidates=True)
+    assert kept.playbooks["London"] == "sweep_mss, score >= 60"
+    assert len(kept.result.trades) == 1
+
+
 def test_entry_lifetime_reuses_the_signals_but_the_entry_price_does_not(
     settings: Settings, market: MarketData, tmp_path: Path
 ) -> None:

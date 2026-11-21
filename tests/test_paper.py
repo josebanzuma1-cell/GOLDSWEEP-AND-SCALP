@@ -103,9 +103,13 @@ def db(tmp_path: Path) -> Iterator[Database]:
 def test_the_textbook_setup_is_traded_on_paper(settings: Settings, db: Database) -> None:
     h = Harness(settings, db)
     h.run_until(utc(2026, 11, 17, 8, 40))
-    # The stop moves to breakeven when TP1 is reached (D84: not at +1 R).
-    alert, filled, tp1, breakeven, closed = h.notes.sent
+    # The stop moves to breakeven when TP1 is reached (D84: not at +1 R). The setup
+    # is also London's A+ candidate (a Judas swing), so a paper-only copy of it is
+    # monitored on the shadow book and its result reported (D87).
+    alert, filled, tp1, breakeven, closed, monitored = h.notes.sent
     assert alert.startswith("🟢 XAUUSD LONG setup (score 81.1) — London kill zone")
+    assert "Grade: A+ (London playbook)" in alert
+    assert "👀 monitored for the London A+ playbook (0 of 20 finished)" in alert
     assert "Entry: 2028.90 (FVG mid, limit) | SL: 2026.09 | TP1: 2036.00 | TP2: 2048.00" in alert
     assert "Risk 0.5% (0.17 lots)" in alert
     assert "Action: paper limit order placed, valid until 09:55 UTC" in alert  # 24 bars
@@ -116,6 +120,12 @@ def test_the_textbook_setup_is_traded_on_paper(settings: Settings, db: Database)
     assert "TP1 hit, 0.08 lots closed at 2036.00 (+$56.24)" in tp1
     # The same result as the backtester: one shared trade book.
     assert closed.startswith("🏁 PAPER LONG 2026-11-17-LDN-01 closed (tp2) at 2048.00: +$227.51")
+    # The monitored copy is traded by the same rules, so it ends the same way.
+    assert monitored.startswith(
+        "👀🏁 Monitored LONG 2026-11-17-LDN-01 (London A+ playbook) closed (tp2): +4.77 R"
+    )
+    assert "Monitoring: 1 finished, 1 won, +4.77 R average; 20 needed." in monitored
+    assert db.query("SELECT playbook, exit_reason FROM shadow_trades") == [("london", "tp2")]
     assert db.query("SELECT id, action FROM signals") == [("2026-11-17-LDN-01", "traded")]
     (row,) = db.query("SELECT exit_reason, round(net_pnl, 2), lots FROM paper_trades")
     assert row == ("tp2", 227.51, 0.17)

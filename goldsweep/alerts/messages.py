@@ -125,8 +125,14 @@ def signal_alert(
     mode: str,
     take_profit_3: float | None = None,
     plan: TradePlan | None = None,
+    grade: str | None = None,
+    monitoring: str | None = None,
 ) -> str:
-    """``plan``, when given, supplies the targets actually used (fixed-R targets, D84)."""
+    """``plan``, when given, supplies the targets actually used (fixed-R targets, D84).
+
+    ``grade`` is the setup's grade (A+ / A / B, D86) and ``monitoring`` says whether
+    it went on the shadow book for its session's A+ candidate (D87).
+    """
     icon = "🟢" if traded else ("⛔" if blocked else "🟡")
     tp1, tp2, rr1 = signal.take_profit_1, signal.take_profit_2, signal.risk_reward_1
     rr2_value = signal.risk_reward_2
@@ -151,9 +157,40 @@ def signal_alert(
         lines.append(f"Pressure: {pressure.describe()}")
     if signal.tags:
         lines.append("Confluence: " + ", ".join(_TAG_NAMES.get(t, t) for t in signal.tags))
+    if grade:
+        lines.append(f"Grade: {grade}")
     lines.append(f"Action: {action}")
+    if monitoring:
+        lines.append(f"👀 {monitoring}")
     lines.append(f"Mode: {mode}  |  id: {signal.id}")
     return "\n".join(lines)
+
+
+def tally_text(tally: Any) -> str:
+    """``7 finished, 3 won, +0.42 R average`` (a :class:`~goldsweep.execution.shadow.Tally`)."""
+    if not tally.finished:
+        return "0 finished"
+    return f"{tally.finished} finished, {tally.won} won, {tally.average_r:+.2f} R average"
+
+
+def monitor_result(trade: Any, playbook_name: str, tally: Any, needed: int) -> str:
+    """A monitored (paper-only) trade of a session's A+ candidate has finished (D87)."""
+    icon = "🏁" if trade.r_multiple >= 0 else "🔴"
+    return (
+        f"👀{icon} Monitored {trade.direction.value} {trade.plan.id} ({playbook_name} A+ "
+        f"playbook) closed ({trade.exit_reason.value}): {trade.r_multiple:+.2f} R, paper only. "
+        f"Monitoring: {tally_text(tally)}; {needed} needed."
+    )
+
+
+def approval_request(playbook: str, playbook_name: str, rule: str, tally: Any) -> str:
+    """The candidate has its monitored trades with a positive average: ask the owner."""
+    return (
+        f"✅ {playbook_name} A+ playbook confirmed in monitoring: {tally_text(tally)}.\n"
+        f"Rule: {rule}.\n"
+        f"Send /approve {playbook} to let it trade. Until then it is only monitored. "
+        "Past results do not guarantee future ones; every trade can lose."
+    )
 
 
 def refined_entry(
@@ -315,5 +352,6 @@ HELP = (
     "Commands: /status (state, equity, positions), /pause (no new trades; open trades "
     "stay managed), /resume, /stop (kill switch: close everything and stop trading "
     "until /resume), /golive <account> (after an unattended start: allow live orders), "
-    "/help"
+    "/approve <session> (a session's A+ playbook trades, after its monitoring), "
+    "/revoke <session> (back to monitoring), /help"
 )

@@ -28,6 +28,17 @@ if TYPE_CHECKING:
     from goldsweep.core.settings import PlaybookRule, PlaybooksConfig, SessionPlaybook
 
 PLAYBOOK_SESSIONS = ("asia", "london", "newyork")
+_PLAYBOOK_NAMES = {"asia": "Asia", "london": "London", "newyork": "New York"}
+#: What the owner may type after /approve and /revoke.
+_PLAYBOOK_ALIASES = {
+    "asia": "asia",
+    "asian": "asia",
+    "tokyo": "asia",
+    "london": "london",
+    "ldn": "london",
+    "newyork": "newyork",
+    "ny": "newyork",
+}
 #: The confluence tags (D85) that ``min_tags`` counts; trend and structure context
 #: tags (D86) are asked for by name with ``tags_all``.
 CONFLUENCE = frozenset({"smt", "unicorn", "bpr", "judas", "silver_bullet", "ote"})
@@ -47,6 +58,17 @@ def playbook_session(session: str | None) -> str | None:
     if session in (NEW_YORK, OVERLAP, POST_NEWS):
         return "newyork"
     return None
+
+
+def playbook_name(playbook: str) -> str:
+    """Asia, London or New York."""
+    return _PLAYBOOK_NAMES.get(playbook, playbook)
+
+
+def parse_playbook(text: str) -> str | None:
+    """``"New York"``, ``"ny"``, ``"tokyo"`` ... -> the playbook key, or None."""
+    key = "".join(ch for ch in text.lower() if ch.isalpha())
+    return _PLAYBOOK_ALIASES.get(key)
 
 
 def meets(signal: Signal, rule: PlaybookRule, *, neutral_extra: float) -> bool:

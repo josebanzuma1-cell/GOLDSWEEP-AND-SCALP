@@ -158,11 +158,14 @@ def signals(db: Database, since: dt.datetime, tp3_r: float = 3.0) -> pd.DataFram
                 "pool": extra.get("pool"),
                 "pool_price": extra.get("pool_price"),
                 "what_happened": extra.get("action"),
+                # Phase 10 (D87): the setup's grade and whether it is being monitored.
+                "grade": extra.get("grade"),
+                "monitoring": extra.get("monitoring"),
             }
         )
     columns = [
         "time", "id", "direction", "session", "score", "entry", "stop_loss", "tp1", "tp2",
-        "tp3", "rr", "action", "pool", "pool_price", "what_happened",
+        "tp3", "rr", "action", "pool", "pool_price", "what_happened", "grade", "monitoring",
     ]  # fmt: skip
     return pd.DataFrame.from_records(records, columns=columns)
 

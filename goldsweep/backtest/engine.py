@@ -28,6 +28,13 @@ import numpy as np
 import pandas as pd
 
 from goldsweep.analysis.context import CONTEXT_TAGS, ContextFrames, with_context
+from goldsweep.analysis.grades import (
+    PLAYBOOK_SESSIONS,
+    describe_rule,
+    meets,
+    playbook_name,
+    playbook_session,
+)
 from goldsweep.analysis.pressure import STRUCTURE_BARS, pressure_meter
 from goldsweep.analysis.refine import M1Refinement
 from goldsweep.analysis.signals import MODELS, SignalEngine
@@ -45,6 +52,7 @@ from goldsweep.backtest.metrics import (
 )
 from goldsweep.backtest.simulator import (
     PriceSeries,
+    SignalOutcome,
     SignalRecord,
     SimulationResult,
     Simulator,
@@ -52,13 +60,13 @@ from goldsweep.backtest.simulator import (
     combine_series,
 )
 from goldsweep.backtest.walkforward import Combo, WalkForwardResult, make_selector, walk_forward
-from goldsweep.core.clock import LONDON, NEW_YORK, OVERLAP, SessionCalculator, ensure_utc
+from goldsweep.core.clock import ASIA, LONDON, NEW_YORK, OVERLAP, SessionCalculator, ensure_utc
 from goldsweep.core.logging import get_logger
-from goldsweep.core.settings import CostConfig, Settings
+from goldsweep.core.settings import CostConfig, PlaybookRule, Settings
 from goldsweep.core.types import Timeframe
 from goldsweep.data.broker import SymbolSpec
 from goldsweep.data.candles import aggregate_candles
-from goldsweep.execution.book import Trade
+from goldsweep.execution.book import Outcome, Trade
 from goldsweep.risk.risk_manager import NewsEvent
 
 log = get_logger(__name__)
@@ -104,6 +112,10 @@ class BacktestResult:
     fingerprints: dict[str, str]
     signals_cached: bool
     settings_snapshot: dict[str, object] = field(default_factory=dict)
+    #: The rule each session traded by (D87), described; "none" where it alerted only.
+    playbooks: dict[str, str] = field(default_factory=dict)
+    #: True when the run traded the A+ candidates as if approved (``--candidates``).
+    candidates: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -456,6 +468,52 @@ def by_confluence(trades: Sequence[Trade], balance: float) -> dict[str, Metrics]
     return groups
 
 
+def by_playbook(trade: Trade) -> str:
+    """Asia, London or New York (the overlap and post-news windows count as New York)."""
+    playbook = playbook_session(trade.plan.session)
+    return playbook_name(playbook) if playbook is not None else "other"
+
+
+#: Why a signal outside every session playbook was not traded.
+OUTSIDE_PLAYBOOKS = "outside the session playbooks"
+
+
+def playbook_rules(
+    settings: Settings, *, candidates: bool = False
+) -> dict[str, PlaybookRule | None]:
+    """The rule each session trades by (D87).
+
+    By default the ``trading`` rules, as live trading uses them now. With
+    ``candidates`` each session's A+ candidate is traded as if the owner had
+    approved it (sessions without a candidate keep their trading rule), to compare.
+    """
+    books = settings.config.playbooks
+    rules: dict[str, PlaybookRule | None] = {}
+    for name in PLAYBOOK_SESSIONS:
+        book = getattr(books, name)
+        rules[name] = (book.candidate or book.trading) if candidates else book.trading
+    return rules
+
+
+def split_by_playbook(
+    records: Sequence[SignalRecord],
+    rules: dict[str, PlaybookRule | None],
+    *,
+    neutral_extra: float,
+) -> tuple[list[SignalRecord], list[SignalOutcome]]:
+    """The records their session's rule takes, and NOT_SELECTED outcomes for the rest."""
+    kept: list[SignalRecord] = []
+    left: list[SignalOutcome] = []
+    for record in records:
+        playbook = playbook_session(record.signal.session)
+        rule = rules.get(playbook) if playbook is not None else None
+        if rule is not None and meets(record.signal, rule, neutral_extra=neutral_extra):
+            kept.append(record)
+        else:
+            left.append(SignalOutcome(record, Outcome.NOT_SELECTED, OUTSIDE_PLAYBOOKS))
+    return kept, left
+
+
 def run_backtest(
     settings: Settings,
     data: MarketData,
@@ -466,8 +524,13 @@ def run_backtest(
     cache_dir: Path | None = None,
     progress: Progress | None = None,
     events: Sequence[NewsEvent] = (),
+    candidates: bool = False,
 ) -> BacktestResult:
-    """The full backtest: signals, the configured strategy's trades, walk-forward."""
+    """The full backtest: signals, the configured strategy's trades, walk-forward.
+
+    Only the setups their session's playbook rule takes are traded (D87), as in live
+    trading; with ``candidates`` the A+ candidates are traded as if approved.
+    """
     config = settings.config
     strategy = config.strategy
     start, end = ensure_utc(start), ensure_utc(end)
@@ -491,15 +554,22 @@ def run_backtest(
     )
     neutral_extra = strategy.bias.neutral_extra_score
     balance = config.backtest.initial_balance
+    rules = playbook_rules(settings, candidates=candidates)
+    tradeable, outside = split_by_playbook(records, rules, neutral_extra=neutral_extra)
     result = simulator.run(
-        records,
+        tradeable,
         select=make_selector(threshold, strategy.min_rr, neutral_extra),
         start=start,
         end=end,
     )
+    window = [o for o in outside if start <= o.record.time < end]
+    result.outcomes.extend(window)
     trades = result.trades
     breakdowns: dict[str, dict[str, Metrics]] = {
-        "session": breakdown(trades, by_session, balance, order=[LONDON, NEW_YORK, OVERLAP]),
+        "playbook": breakdown(
+            trades, by_playbook, balance, order=[playbook_name(p) for p in PLAYBOOK_SESSIONS]
+        ),
+        "session": breakdown(trades, by_session, balance, order=[ASIA, LONDON, NEW_YORK, OVERLAP]),
         "weekday": breakdown(trades, by_weekday, balance, order=list(WEEKDAYS)),
         "direction": breakdown(trades, by_direction, balance, order=["LONG", "SHORT"]),
         "pressure": breakdown(
@@ -515,7 +585,7 @@ def run_backtest(
     if run_walk_forward:
         wf = walk_forward(
             simulator,
-            records,
+            tradeable,
             config=config.backtest.walk_forward,
             start=start,
             end=end,
@@ -542,4 +612,9 @@ def run_backtest(
         },
         signals_cached=cached,
         settings_snapshot=config.model_dump(mode="json"),
+        playbooks={
+            playbook_name(name): describe_rule(rule) if rule is not None else "none"
+            for name, rule in rules.items()
+        },
+        candidates=candidates,
     )

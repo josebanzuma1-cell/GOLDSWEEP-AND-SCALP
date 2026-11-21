@@ -89,6 +89,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("auto_trade", "alert"),
         help="trade signals from the auto-trade threshold (default) or from the alert threshold",
     )
+    parser.add_argument(
+        "--candidates",
+        action="store_true",
+        help="trade each session's A+ candidate as if approved, to compare (D87)",
+    )
     parser.add_argument("--out", type=Path, help="folder for the report (default: reports/...)")
     parser.add_argument("--config", type=Path, help="config.yaml to use")
     parser.add_argument("--no-cache", action="store_true", help="do not reuse cached signals")
@@ -303,8 +308,12 @@ def console_summary(result: BacktestResult, paths: dict[str, Path]) -> list[str]
     lines.append(
         f"Signals     : {len(result.records)}{cached}" + (f" -> {detail}" if detail else "")
     )
+    which = "A+ candidates as if approved" if result.candidates else "trading rules"
+    for number, (playbook, rule) in enumerate(result.playbooks.items()):
+        label = "Playbooks" if number == 0 else ""
+        lines.append(f"{label:<12}: {playbook:<9}{rule}" + (f"  ({which})" if number == 0 else ""))
     lines.append(f"Strategy    : {_metrics_line(result.metrics, currency)}")
-    for name in ("session", "weekday", "pressure", "model", "confluence"):
+    for name in ("playbook", "session", "weekday", "pressure", "model", "confluence"):
         groups = result.breakdowns.get(name, {})
         for number, (key, metrics) in enumerate(groups.items()):
             label = f"By {name}" if number == 0 else ""
@@ -421,9 +430,12 @@ def main(
             run_walk_forward=not args.no_walk_forward,
             cache_dir=cache_dir,
             progress=progress,
+            candidates=args.candidates,
         )
-        name = f"backtest_{args.start:%Y-%m-%d}_{args.end:%Y-%m-%d}" + (
-            "_mock" if args.mock else ""
+        name = (
+            f"backtest_{args.start:%Y-%m-%d}_{args.end:%Y-%m-%d}"
+            + ("_mock" if args.mock else "")
+            + ("_candidates" if args.candidates else "")
         )
         out_dir = args.out or settings.config_path.parent / "reports" / name
         command = "python -m goldsweep.backtest " + " ".join(arguments)

@@ -1309,3 +1309,74 @@ The acceptance backtest with the shipped config is unchanged by this stage.
 **Decision:** the candidates above are in `config.yaml` (Asia none); in this stage
 they only label setups A+. `sessions.asia.trade` stays false until stage 2 routes
 Asian setups to monitoring, so nothing new can trade before then.
+
+### D87. Monitoring on a shadow book, then `/approve <session>`
+
+**What was built (stage 2).**
+
+- **Routing** (`live.py::_handle_signal`). A setup trades for real only when its
+  session's *live rule* takes it: the approved candidate if there is one, otherwise
+  the `trading` rule. The model's `models.<name>.trade` flag and the auto-trade
+  threshold still apply on top (the safer reading: a rule never lowers them). A
+  setup outside the rule is an alert: "alert only: outside the London playbook
+  (...)", or "the Asia playbook does not trade yet".
+- **The shadow book** (`execution/shadow.py`). Every alerted setup that meets its
+  session's candidate, while that candidate is not approved, is also placed on a
+  second `TradeBook`: the same fills, costs, deadline rule, management and risk
+  limits as paper trading, on its own notional 10,000 balance, counted in R. It is
+  never sent to MetaTrader 5, in paper or live mode. This happens whether or not the
+  trading rule also took the setup: the London and New York candidates are subsets
+  of what trades there, so this is how their filter gets measured. Finished trades
+  go to the `shadow_trades` table (migration 6) with the session and the
+  candidate's *fingerprint* (a hash of the rule). The book's state is saved after
+  every change, so a restart carries on; paper and live share it (it never trades).
+  The shadow book trades the plain plan, without M1 refinement (D83 is off).
+- **Confirmation.** After each finished monitored trade the owner gets its result
+  and the tally (finished, won, average R). When `playbooks.monitor_trades` (20)
+  have finished with a positive average, one message asks for
+  `/approve <session>` (asked once per candidate fingerprint).
+- **Commands.** `/approve <session>` (asia/tokyo, london, newyork/ny) works only
+  for a confirmed candidate; it stores `{session: fingerprint}` and from then on
+  that candidate *replaces* the trading rule: only A+ setups trade in that session,
+  as the owner asked. `/revoke <session>` returns to the trading rule and the
+  candidate is monitored again. Editing a candidate in config.yaml changes its
+  fingerprint: the approval no longer applies and the count starts from zero.
+  `/approve` never arms an unattended start (`/golive` still does) and is not a
+  dashboard command. `/status` lists each session: what trades there and the
+  candidate's state and tally, and the monitored setups open now.
+- **Grades in alerts.** Every alert has a "Grade:" line (A+ with its playbook, A or
+  B) and, when monitored, "👀 monitored for the London A+ playbook (7 of 20
+  finished)". Both are stored in the signal's detail and shown on the dashboard's
+  Signals tab. Blocked setups follow `alerts.send_blocked` as before, monitored or
+  not.
+- **Safety.** The kill switch also clears the shadow book (nothing of it is
+  counted) and no setup is monitored while trading is stopped; monitoring goes on
+  while paused (it never trades). Risk limits of the real account count real trades
+  only. Shadow-book errors are logged and never stop trading.
+- **Asia is switched on** (`sessions.asia.trade: true`): the engine now looks for
+  setups 09:00-15:00 Tokyo. Its playbook has no trading rule and no candidate, so its
+  setups are graded and alerted, never traded, until an analysis finds a candidate
+  that then passes monitoring.
+- **Backtests trade the playbooks** (`backtest/engine.py`): a setup outside its
+  session's trading rule is NOT_SELECTED ("outside the session playbooks"), and the
+  walk-forward test sees only the setups the rules take. `--candidates` trades each
+  session's candidate as if approved (sessions without one keep their trading rule),
+  for comparison; the report lists the rules used and adds a by-playbook table.
+
+**Results** (2024-01-01..2026-10-31, M1 fills, Asia now on):
+
+| Run | Trades | Won | Profit factor | R per trade | Return | Max DD |
+|---|---|---|---|---|---|---|
+| Shipped config (trading rules) | 55 | 36.4% | 2.40 | +0.93 | +26.7% | 2.9% |
+| `--candidates` (Judas rule in London and New York) | 49 | 40.8% | 2.87 | +1.17 | +29.9% | 2.9% |
+
+The acceptance result is unchanged by switching Asia on (walk-forward: 45
+out-of-sample trades, +0.89 R each): the engine found 87 Asian setups in the 34
+months, about 2.5 a month, all recorded as not selected because Asia has no rule.
+The `--candidates` figures are not new evidence: the Judas rule was chosen on the
+first two-thirds of this same history (D86), so the comparison is flattered. That
+is why a candidate must still finish 20 monitored trades on new data before the
+owner is asked.
+
+**Decision:** London and New York keep trading their current rule and monitor the
+Judas candidate; Asia alerts only. No candidate trades without `/approve`.

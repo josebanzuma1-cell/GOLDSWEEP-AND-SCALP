@@ -239,6 +239,29 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
         CREATE INDEX idx_commands_status ON commands (status);
         """,
     ),
+    (
+        6,
+        """
+        -- Phase 10: monitored A+ setups, traded on the shadow book (never sent).
+        CREATE TABLE shadow_trades (
+            id          TEXT PRIMARY KEY,  -- the signal id
+            playbook    TEXT    NOT NULL,  -- asia / london / newyork
+            fingerprint TEXT    NOT NULL,  -- the candidate rule it was monitored for
+            direction   TEXT    NOT NULL,
+            session     TEXT,
+            score       REAL    NOT NULL,
+            signal_time INTEGER NOT NULL,
+            fill_time   INTEGER NOT NULL,
+            exit_time   INTEGER NOT NULL,
+            fill_price  REAL    NOT NULL,
+            stop_loss   REAL    NOT NULL,
+            exit_reason TEXT    NOT NULL,
+            net_pnl     REAL    NOT NULL,
+            r_multiple  REAL    NOT NULL
+        ) WITHOUT ROWID;
+        CREATE INDEX idx_shadow_trades_playbook ON shadow_trades (playbook, fingerprint);
+        """,
+    ),
 )
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

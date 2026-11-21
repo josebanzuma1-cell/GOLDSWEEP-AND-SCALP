@@ -17,7 +17,8 @@ timeframes: {bias: H1, liquidity: M15, trigger: M5}
 sessions:
   # Every window is written in its own local time zone and converted to UTC
   # for each day, so daylight-saving changes need no edits here.
-  asia:    {tz: Asia/Tokyo,       start: "09:00", end: "15:00", trade: false}
+  # Asia's setups are looked for (D87); what trades there is up to its playbook below.
+  asia:    {tz: Asia/Tokyo,       start: "09:00", end: "15:00", trade: true}
   london:  {tz: Europe/London,    start: "07:00", end: "10:00", trade: true}
   newyork: {tz: America/New_York, start: "08:00", end: "11:00", trade: true}
   # London-NY overlap = the hours when both full sessions below are open.
@@ -267,10 +268,13 @@ models:
   # (The Silver Bullet model was replaced by session playbooks, D86; the Silver
   # Bullet hours remain a confluence tag.)
 
-# Session playbooks (Phase 10, D86). Per session: what auto-trades there now
+# Session playbooks (Phase 10, D86, D87). Per session: what auto-trades there now
 # (trading) and the A+ playbook the analysis found (candidate). A candidate is
-# graded A+ in alerts and paper-traded on a shadow book; after monitor_trades
-# finished trades with a positive average the bot asks for /approve <session>.
+# graded A+ in alerts and paper-traded on a shadow book (never sent to MT5); after
+# monitor_trades finished trades with a positive average the bot asks for
+# /approve <session>. An approved candidate replaces the trading rule (only A+
+# setups trade there); /revoke <session> undoes it. Editing a candidate here
+# withdraws its approval and starts its count again.
 # python -m goldsweep.playbook --from 2024-01-01 --to 2026-10-31 suggests them.
 playbooks:
   asia:                        # the Asian (Tokyo) session
