@@ -164,8 +164,8 @@ def test_the_textbook_setup_becomes_one_winning_trade(
         (0.08, 2036.0, ExitReason.TP1),
         (0.09, 2048.0, ExitReason.TP2),
     ]
-    # 7.10 x 8 + 19.10 x 9, less 7.00 commission per lot.
-    assert trade.net_pnl == pytest.approx(56.8 + 171.9 - 7.0 * 0.17)
+    # 7.10 x 8 + 19.10 x 9; no commission on this account (D108): the spread is the cost.
+    assert trade.net_pnl == pytest.approx(56.8 + 171.9)
     assert trade.r_multiple > 4.5
     assert trade.record.pressure is not None
     assert result.metrics.trades == 1 and result.metrics.win_rate == 1.0

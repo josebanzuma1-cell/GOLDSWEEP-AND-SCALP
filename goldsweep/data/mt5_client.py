@@ -51,6 +51,7 @@ from goldsweep.data.broker import (
     TerminalInfo,
     Tick,
     TradeMode,
+    empty_ticks,
 )
 from goldsweep.data.candles import empty_candles
 
@@ -116,6 +117,12 @@ def _connection_hint(error_code: int) -> str:
             "shows a live connection, then try again."
         )
     return "Is MetaTrader 5 installed and able to start on this PC?"
+
+
+def _ping_ms(raw_terminal: Any) -> float | None:
+    """The terminal's last ping (MT5 reports microseconds), or None when it has none."""
+    value = getattr(raw_terminal, "ping_last", None)
+    return round(float(value) / 1000.0, 1) if value else None
 
 
 def _tick_server_epoch(raw_tick: Any) -> float:
@@ -482,6 +489,7 @@ class MT5Client(BrokerClient):
             path=str(raw.path),
             data_path=str(raw.data_path),
             common_data_path=str(raw.commondata_path),
+            ping_ms=_ping_ms(raw),
         )
 
     # -- symbols ----------------------------------------------------------- #
@@ -735,3 +743,29 @@ class MT5Client(BrokerClient):
             ask=float(raw.ask),
             last=float(getattr(raw, "last", 0.0)),
         )
+
+    def get_ticks(self, symbol: str, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
+        first, last = ensure_utc(start), ensure_utc(end)
+        if last <= first:
+            raise ValueError("end must be after start")
+        self._ensure_server_time(symbol)
+        raw = self._call(
+            "copy_ticks_range",
+            symbol,
+            self._to_mt5_time(first),
+            self._to_mt5_time(last),
+            self._mt5.COPY_TICKS_INFO,  # bid/ask changes
+        )
+        if raw is None:
+            raise BrokerError(f"MT5 returned no ticks for {symbol}: {self._last_error()[1]}")
+        if len(raw) == 0:
+            return empty_ticks()
+        server = pd.DatetimeIndex(pd.to_datetime(raw["time_msc"].astype("int64"), unit="ms"))
+        frame = pd.DataFrame(
+            {
+                "bid": raw["bid"].astype("float64"),
+                "ask": raw["ask"].astype("float64"),
+            },
+            index=self._state.rule.index_to_utc(server).rename("time"),
+        )
+        return frame.loc[(frame.index >= first) & (frame.index < last)]

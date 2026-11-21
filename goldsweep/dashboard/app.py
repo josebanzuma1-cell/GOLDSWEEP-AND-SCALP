@@ -331,6 +331,21 @@ def control_tab(db: Database, status: data.BotStatus, zone: dt.tzinfo) -> None:
     if cols[2].button("ℹ️ Ask for /status", disabled=not status.alive, key="status"):
         sent = st.session_state["command_id"] = data.send_command(db, "status", now)
     st.divider()
+    st.subheader("Strategies and scalper mode")
+    switch = data.switch_state(db)
+    st.write(
+        f"Now: **{switch.get('strategies', 'main')}** may trade; scalper: "
+        f"**{switch.get('scalper', 'off')}**. A scalper mode trades only after its evidence "
+        "test and /approve scalper <mode> on Telegram; until then it runs on paper."
+    )
+    cols = st.columns(2)
+    strategies = cols[0].selectbox("Strategies that may trade", ["main", "scalper", "both"])
+    if cols[0].button("Apply", disabled=not status.alive, key="apply_mode"):
+        sent = st.session_state["command_id"] = data.send_command(db, f"mode:{strategies}", now)
+    mode = cols[1].selectbox("Scalper mode", ["off", "tick", "intraday", "swing"])
+    if cols[1].button("Apply", disabled=not status.alive, key="apply_scalper"):
+        sent = st.session_state["command_id"] = data.send_command(db, f"scalper:{mode}", now)
+    st.divider()
     st.subheader("🛑 Kill switch")
     st.write(
         "Cancels every GoldSweep entry order, closes every GoldSweep position at market and "

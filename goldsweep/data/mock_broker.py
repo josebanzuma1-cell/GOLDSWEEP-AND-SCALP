@@ -31,6 +31,7 @@ from goldsweep.data.broker import (
     TerminalInfo,
     Tick,
     TradeMode,
+    empty_ticks,
 )
 from goldsweep.data.candles import aggregate_candles, empty_candles, validate_candles
 
@@ -317,3 +318,24 @@ class MockBroker(BrokerClient):
         bid = round(price - spread / 2.0, spec.digits)
         ask = round(bid + spread, spec.digits)
         return Tick(time=min(now, last_close), bid=bid, ask=ask, last=price)
+
+    def get_ticks(self, symbol: str, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
+        """Four ticks per closed one-minute bar (open, high, low, close at 0/15/30/45 s)."""
+        spec = self.symbol_spec(symbol)
+        first, last = pd.Timestamp(ensure_utc(start)), pd.Timestamp(ensure_utc(end))
+        if last <= first:
+            raise ValueError("end must be after start")
+        bars = self._closed(Timeframe.M1, pd.Timestamp(self._clock.now()))
+        bars = bars.loc[(bars.index >= first - _ONE_MINUTE) & (bars.index < last)]
+        if bars.empty:
+            return empty_ticks()
+        offsets = [pd.Timedelta(seconds=s) for s in (0, 15, 30, 45)]
+        columns = ("open", "high", "low", "close")
+        times = [t + offset for t in bars.index for offset in offsets]
+        prices = [float(bars.at[t, c]) for t in bars.index for c in columns]
+        spread = self._spread_points * spec.point
+        frame = pd.DataFrame(
+            {"bid": prices, "ask": [round(p + spread, spec.digits) for p in prices]},
+            index=pd.DatetimeIndex(times, name="time"),
+        )
+        return frame.loc[(frame.index >= first) & (frame.index < last)]

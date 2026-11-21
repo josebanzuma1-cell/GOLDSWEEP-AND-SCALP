@@ -151,6 +151,16 @@ class TerminalInfo:
     path: str
     data_path: str
     common_data_path: str  # holds Common\Files, used for signals.json in Phase 6
+    #: The terminal's last measured round trip to the trade server (S2), when known.
+    ping_ms: float | None = None
+
+
+def empty_ticks() -> pd.DataFrame:
+    """A tick frame with no rows: columns ``bid`` and ``ask``, a UTC ``time`` index."""
+    return pd.DataFrame(
+        {"bid": pd.Series(dtype="float64"), "ask": pd.Series(dtype="float64")},
+        index=pd.DatetimeIndex([], tz="UTC", name="time"),
+    )
 
 
 def rank_gold_symbols(names: Iterable[str], exclude: Iterable[str] = ()) -> list[str]:
@@ -323,6 +333,14 @@ class BrokerClient(ABC):
     @abstractmethod
     def get_tick(self, symbol: str) -> Tick:
         """The latest quote."""
+
+    def get_ticks(self, symbol: str, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
+        """Every bid/ask change in ``[start, end)`` (true UTC), oldest first (D106).
+
+        Columns ``bid`` and ``ask``; the index (``time``) is the tick's UTC time to the
+        millisecond. Brokers keep only a limited tick history.
+        """
+        raise BrokerError(f"the {self.name} broker does not serve tick history")
 
     def spread_points(self, symbol: str) -> float:
         """Current spread in broker points (ask minus bid, divided by the point size)."""

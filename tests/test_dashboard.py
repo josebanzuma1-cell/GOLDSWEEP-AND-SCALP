@@ -1,7 +1,7 @@
 """The dashboard (Phase 7): what the bot stores for it, its data layer, charts and page.
 
 The paper trader runs the hand-made Phase 2 market (tests/test_paper.py): one
-long at 2028.90 that fills, reaches TP1 and closes at TP2 for +227.51.
+long at 2028.90 that fills, reaches TP1 and closes at TP2 for +228.70.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ def test_the_bot_stores_what_the_dashboard_reads(traded: Harness) -> None:
         "active",
         "XAUUSD",
     )
-    assert picture["equity"] == pytest.approx(10_227.51)
+    assert picture["equity"] == pytest.approx(10_228.70)
     assert picture["positions"] == [] and picture["orders"] == []
     assert picture["pools"] and {"label", "price", "side", "strength", "swept"} <= set(
         picture["pools"][0]
@@ -60,7 +60,7 @@ def test_the_bot_stores_what_the_dashboard_reads(traded: Harness) -> None:
     assert picture["pressure"]["buyers"] + picture["pressure"]["sellers"] == pytest.approx(100)
     risk = picture["risk"]
     assert (risk["trades_today"], risk["max_trades_per_day"], risk["open"]) == (1, 3, 0)
-    assert risk["day_pnl"] == pytest.approx(227.51) and risk["day_limit"] < 0
+    assert risk["day_pnl"] == pytest.approx(228.70) and risk["day_limit"] < 0
     frame = data.candles(traded.db, "XAUUSD", bars=500)
     assert not frame.empty and frame.index[-1] == pd.Timestamp(END - dt.timedelta(minutes=5))
 
@@ -113,8 +113,8 @@ def test_signals_trades_and_equity(traded: Harness) -> None:
     assert row.monitoring == "monitored for the London A+ playbook (0 of 20 finished)"
     closed = data.trades(db, live=False)
     assert list(closed["exit"]) == ["tp2"] and closed["parts"].iloc[0] == 2
-    curve = data.equity_curve(closed, 10_227.51)
-    assert list(curve["equity"]) == pytest.approx([10_000.0, 10_227.51])
+    curve = data.equity_curve(closed, 10_228.70)
+    assert list(curve["equity"]) == pytest.approx([10_000.0, 10_228.70])
     stats = data.trade_stats(closed)
     assert (stats.trades, stats.wins, stats.losses, stats.profit_factor) == (1, 1, 0, None)
     assert data.trades(db, live=True).empty
@@ -239,7 +239,7 @@ def test_the_page_renders_and_sends_commands(
     page.run()
     assert not page.exception
     metrics = {m.label: m.value for m in page.metric}
-    assert metrics["Mode"] == "PAPER" and metrics["Equity"] == "10,227.51"
+    assert metrics["Mode"] == "PAPER" and metrics["Equity"] == "10,228.70"
     assert any("PAPER bot running" in s.value for s in page.success)
     page.button(key="pause").click().run()
     assert not page.exception

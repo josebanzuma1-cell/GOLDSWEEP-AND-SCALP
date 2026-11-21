@@ -125,8 +125,11 @@ class FakeMT5:
             path=r"C:\MT5",
             data_path=r"C:\MT5\data",
             commondata_path=r"C:\MT5\common",
+            ping_last=68_700,  # microseconds, as MT5 reports it
         )
         self.bars: dict[int, list[Row]] = {}
+        #: Ticks by TRUE UTC time: (time, bid, ask); served in server time (S2).
+        self.ticks: list[tuple[dt.datetime, float, float]] = []
         #: Every call made, as (function name, positional args, keyword args).
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
         #: Scripted results for successive initialize() / login() calls (default: success).
@@ -289,6 +292,25 @@ class FakeMT5:
         if end <= 0:
             return self._to_array([])
         return self._to_array(rows[max(0, end - count) : end])
+
+    COPY_TICKS_INFO = 1
+
+    def copy_ticks_range(
+        self, symbol: str, date_from: dt.datetime, date_to: dt.datetime, flags: int
+    ) -> np.ndarray | None:
+        self._record("copy_ticks_range", symbol, date_from, date_to, flags)
+        if self._fail("copy_ticks_range"):
+            return None
+        low, high = date_from.timestamp() * 1000, date_to.timestamp() * 1000
+        found = []
+        for when, bid, ask in self.ticks:
+            server_ms = int(when.timestamp() * 1000) + self._offset_seconds(when) * 1000
+            if low <= server_ms <= high:
+                found.append((server_ms, bid, ask))
+        out = np.zeros(len(found), dtype=[("time_msc", "<i8"), ("bid", "<f8"), ("ask", "<f8")])
+        for position, row in enumerate(found):
+            out[position] = row
+        return out
 
     def copy_rates_range(
         self, symbol: str, timeframe: int, date_from: dt.datetime, date_to: dt.datetime

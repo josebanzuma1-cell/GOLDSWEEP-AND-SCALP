@@ -80,6 +80,34 @@ def test_market_order_carries_its_stops() -> None:
     assert [row[0] for row in rig.logged] == ["market"]
 
 
+def test_every_send_is_timed(tmp_path: Any) -> None:
+    """S2: how long each order_send took reaches the order log (the tick mode needs it)."""
+    from goldsweep.execution.live_executor import order_logger
+    from goldsweep.storage.db import Database
+
+    rig = Rig()
+    ticks = iter([10.000, 10.087, 20.000, 20.042])  # seconds: 87 ms, then 42 ms
+    with Database(tmp_path / "orders.sqlite3") as db:
+        gateway = MT5Gateway(
+            rig.client,
+            rig.gateway.spec,
+            magic=MAGIC,
+            deviation_points=30,
+            order_log=order_logger(db, rig.clock),
+            timer=lambda: next(ticks),
+        )
+        result = gateway.open(
+            long=True,
+            volume=0.05,
+            stop_loss=2645.0,
+            take_profit=2660.0,
+            comment="GS t 1/1",
+            signal_id="t",
+        )
+        assert result.ok and result.elapsed_ms == pytest.approx(87.0)
+        assert db.query("SELECT elapsed_ms FROM order_log") == [(pytest.approx(87.0),)]
+
+
 def test_no_order_without_a_stop_and_a_target() -> None:
     rig = Rig()
     with pytest.raises(ValueError, match="without a stop-loss"):

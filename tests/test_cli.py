@@ -402,7 +402,8 @@ def test_report_through_the_mt5_client(settings: Settings) -> None:
     assert code == EXIT_OK
     assert "Broker: MetaTrader 5" in text
     assert value(text, "Terminal") == (
-        "MetaTrader 5 build 5200 (MetaQuotes Ltd.); server link up; algo trading enabled"
+        "MetaTrader 5 build 5200 (MetaQuotes Ltd.); server link up; algo trading enabled; "
+        "ping 68.7 ms"  # S2: the terminal's last ping
     )
     assert value(text, "Account") == "5012345 @ Demo-Server  [DEMO]"
     assert value(text, "Server time") == (

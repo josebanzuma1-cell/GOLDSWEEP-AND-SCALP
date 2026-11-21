@@ -63,7 +63,7 @@ def test_the_textbook_sell_is_one_winning_scalp(small: Settings) -> None:
     assert [leg.reason for leg in trade.legs] == [ExitReason.TP1, ExitReason.TP2, ExitReason.TP3]
     assert trade.r_multiple > 0 and run.metrics.win_rate == 1.0
     assert run.days == 1 and run.per_day == 1.0
-    assert trade.commission > 0
+    assert trade.commission == 0  # this account charges none (D108): the spread is the cost
     gross = simulate(small, prepared, Variant("sweep_reclaim", True, 0.5, costs=False))
     (free,) = gross.trades
     # No spread, slippage or commission: the fill is the open, the stop has no spread in it.

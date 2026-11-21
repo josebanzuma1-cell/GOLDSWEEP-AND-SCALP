@@ -31,7 +31,7 @@ review after each one.
 | 8 | Unattended running (Task Scheduler, /golive), heartbeat, watchdog, backups, VPS guide | built, tested, approved |
 | 9 | More trades and "sniper" entries: (1) entries that fill and never wait into a blocked time, (2) M1 refinement, (3) more setup models | built and tested: entries wait 2 hours (D82), M1 refinement left off (D83), breakeven only at TP1 (D84), new models alert only (D85) |
 | 10 | Session playbooks: A+ grades, per-session strategy from the evidence, monitoring before auto-trading | built, tested, approved: candidates from the analysis (D86), shadow-book monitoring, `/approve`, Asia on (D87) |
-| S | Scalper add-on alongside the main strategy (`docs/SCALPER_SPEC.md`): M1 scalps, step trail, three-child ladder, chart dashboard, MT5 assistant | S0 approved (Python engine, D89); S1 (logic, tests, first backtest) built: it loses after costs in every variant (D101), so it stays off. Research on tick ("HFT"), intraday and swing modes with a switch between them: `docs/SCALPER_MODES.md` (D102-D107), awaiting approval |
+| S | Scalper add-on alongside the main strategy (`docs/SCALPER_SPEC.md`): M1 scalps, step trail, three-child ladder, chart dashboard, MT5 assistant | S0 approved (Python engine, D89); S1 (logic, tests, first backtest) built: it loses after costs in every variant (D101), so it stays off. Research on tick ("HFT"), intraday and swing modes with a switch between them: `docs/SCALPER_MODES.md` (D102-D107), approved. S2 (the switch, the tick recorder, latency, costs; D108) built and tested, awaiting approval |
 
 Only `python main.py --live` sends orders to a broker, and only after
 `MODE=LIVE` in `.env`, `mode: LIVE` in `config.yaml` and the account number typed
@@ -94,6 +94,18 @@ count again. The Asian session is switched on: its setups are graded and alerted
 and nothing trades there until it has a candidate that passes monitoring.
 `/status` shows each session's playbook and tally.
 
+**The scalper and the switch (D88-D108).** A scalper add-on is being built beside
+the main strategy, with three modes: tick (seconds to two minutes), intraday and
+swing (`docs/SCALPER_MODES.md`). `/mode main|scalper|both` chooses which strategies
+may open trades and `/scalper off|tick|intraday|swing` chooses the scalper's mode
+(also on the dashboard's Control tab). A mode trades only after it passes its
+evidence test and the owner sends `/approve scalper <mode>`; before that it runs on
+paper, and a mode not built yet does nothing. The first scalper rules lost after
+costs (D101). For the tick mode the bot records every gold tick from the broker into
+`data/ticks/<symbol>/<day>/<hour>.npz` (about 0.3 MB a busy hour, some 5-8 MB a
+trading day; the broker itself keeps only two weeks), and `/status` shows the latency: the terminal's ping and how
+long recent orders took.
+
 A score measures how complete a setup is, not how likely it is to win. Every
 setup can lose; the stop-loss is what keeps that loss small. The choices made
 here are explained in `DECISIONS.md` (D16-D25).
@@ -129,7 +141,9 @@ took 9 seconds. The report goes to `reports/backtest_<from>_<to>/`:
 | `equity.csv`, `walk_forward_trades.csv`, `summary.json` | Equity after each trade, the out-of-sample trades, and every figure as JSON |
 
 Trades are simulated on bid and ask prices with the bars' spread, 10 points of
-slippage on market entries and stops, and 7.00 commission per lot, under the
+slippage on market entries and stops, and no commission (the Exness standard
+account charges none: its cost is the spread; set `commission_per_lot` for an
+account that charges one, D108), under the
 same risk rules the bot will use (0.5% risk per trade, daily and weekly loss
 limits, trade counts, spread filter). Where the order of events inside a bar is
 unknown, the worse case is assumed. The walk-forward test picks settings on 6
@@ -234,6 +248,9 @@ The bot answers only that chat:
 | `/stop` | **kill switch**: cancels every order, closes every paper position, clears the monitored setups, stops trading until `/resume` |
 | `/approve <session>` | after its monitoring is confirmed, the session (`asia`, `london`, `newyork`) trades only its A+ playbook (D87) |
 | `/revoke <session>` | back to the session's trading rule; its A+ candidate is monitored again |
+| `/mode main\|scalper\|both` | which strategies may open trades (D103); `/mode` alone shows it |
+| `/scalper off\|tick\|intraday\|swing` | the scalper's mode; a mode runs on paper until it passes its evidence test and is approved, and an unbuilt mode does nothing |
+| `/approve scalper <mode>` | lets a scalper mode trade, only after its evidence test passed |
 | `/help` | the list |
 
 An alert looks like this:

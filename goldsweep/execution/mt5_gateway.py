@@ -21,7 +21,7 @@ import datetime as dt
 import math
 import time as _time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 from goldsweep.core.logging import get_logger
@@ -122,6 +122,8 @@ class OrderResult:
     deal: int = 0
     price: float = 0.0
     volume: float = 0.0
+    #: How long order_send took, request to answer (S2: the latency the tick mode needs).
+    elapsed_ms: float | None = None
 
     @classmethod
     def failed(cls, message: str, retcode: int = -1) -> OrderResult:
@@ -205,6 +207,7 @@ class MT5Gateway:
         sleep: Callable[[float], None] = _time.sleep,
         attempts: int = 3,
         backoff_seconds: float = 0.5,
+        timer: Callable[[], float] = _time.perf_counter,
     ) -> None:
         self._client = client
         self._spec = spec
@@ -212,6 +215,7 @@ class MT5Gateway:
         self._deviation = deviation_points
         self._log_order = order_log
         self._sleep = sleep
+        self._timer = timer
         self._attempts = max(1, attempts)
         self._backoff = backoff_seconds
 
@@ -377,12 +381,15 @@ class MT5Gateway:
         for attempt in range(1, self._attempts + 1):
             if fresh_price is not None:
                 request["price"] = self.price(fresh_price())
+            started = self._timer()
             raw = self._client.call("order_send", request)
+            elapsed = round((self._timer() - started) * 1000.0, 1)
             if raw is None:
                 code, text = self._client.last_error()
                 result = OrderResult.failed(f"order_send failed: {code} {text}", code)
             else:
                 result = self._result(raw, "no answer")
+            result = replace(result, elapsed_ms=elapsed)
             self._log_order(action, signal_id, dict(request), result)
             if result.ok or result.retcode not in RETRY_CODES or attempt == self._attempts:
                 break
@@ -390,7 +397,14 @@ class MT5Gateway:
             log.warning("order retried", action=action, retcode=result.retcode, delay_seconds=delay)
             self._sleep(delay)
         level = log.info if result.ok else log.error
-        level("order", action=action, signal=signal_id, ok=result.ok, answer=result.message)
+        level(
+            "order",
+            action=action,
+            signal=signal_id,
+            ok=result.ok,
+            answer=result.message,
+            elapsed_ms=result.elapsed_ms,
+        )
         return result
 
     def open(

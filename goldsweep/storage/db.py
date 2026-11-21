@@ -262,6 +262,13 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
         CREATE INDEX idx_shadow_trades_playbook ON shadow_trades (playbook, fingerprint);
         """,
     ),
+    (
+        7,
+        """
+        -- Scalper S2: how long each order_send took, request to answer (milliseconds).
+        ALTER TABLE order_log ADD COLUMN elapsed_ms REAL;
+        """,
+    ),
 )
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

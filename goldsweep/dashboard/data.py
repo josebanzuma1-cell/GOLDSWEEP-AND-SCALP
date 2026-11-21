@@ -382,6 +382,13 @@ def flatten(data: dict[str, Any], prefix: str = "") -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
+def switch_state(db: Database) -> dict[str, str]:
+    """The bot's last reported switch (D103): strategies and scalper mode."""
+    snapshot = db.get_state(SNAPSHOT_KEY) or {}
+    switch = snapshot.get("switch") or {}
+    return {str(key): str(value) for key, value in switch.items()}
+
+
 def send_command(db: Database, name: str, now: dt.datetime) -> int:
     """Queue a command for the running bot; returns its id."""
     if name not in DASHBOARD_COMMANDS:

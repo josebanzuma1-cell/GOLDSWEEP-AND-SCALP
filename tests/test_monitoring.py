@@ -133,7 +133,7 @@ def test_a_candidate_setup_is_monitored_and_never_sent(settings: Settings, db: D
     assert "• Asia: trades alerts only | no A+ candidate" in status
     assert (
         "• London: trades alerts only | A+ candidate monitored: 1 finished, 1 won, "
-        "+4.77 R average (needs 20)"
+        "+4.79 R average (needs 20)"
     ) in status
     assert "• New York: trades sweep_mss, score >= 60 | A+ candidate monitored" in status
 

@@ -15,6 +15,15 @@ must use the same functions). S1 found it loses after costs (D101): it stays off
 The next plan (`docs/SCALPER_MODES.md`, D102-D107) gives it tick, intraday and swing
 modes behind a switch; no mode trades before its evidence gate and `/approve`, and
 latency arbitrage, news spikes, grids, martingale, hedging and stacking are never built.
+- **The switch** (S2, D108): `config.yaml switch:` gives the defaults, `/mode` and
+  `/scalper` (Telegram, or `mode:<x>` / `scalper:<x>` dashboard commands) change them,
+  stored as `switch.*` state. `scalping/modes.py::REGISTRY` says which modes are built
+  and passed; flip `built` / `passed` only in the phase that builds and tests a mode.
+- **Ticks** (D106): `TickRecorder` saves each finished hour to
+  `data/ticks/<symbol>/<YYYY-MM-DD>/<HH>.npz` (UTC ms, bid, ask); read them with
+  `load_ticks`. Brokers serve ticks through `BrokerClient.get_ticks` (true UTC).
+- **Costs:** this account charges no commission (D108); the built-in default stays
+  7.00 a lot for other accounts. Order round trips are timed (`order_log.elapsed_ms`).
 
 ## How the work is organised
 

@@ -1643,3 +1643,35 @@ makes every result a little better), so it waits for the owner's approval. With 
 commission the S1 scalper still loses in all eight M1 variants: -0.10 to -0.18 R a
 trade (it was -0.13 to -0.22 R), the configured one -0.14 R over 4,631 trades; before
 costs they stay at -0.04 to +0.06 R. D101's verdict stands.
+
+### D108. S2: the switch, the tick recorder, latency and costs (built)
+
+The owner approved the plan of D102-D107 and its cost change (2026-11-22).
+
+- **Switch.** `switch:` in config.yaml (`strategies: main`, `scalper_mode: "off"`; YAML
+  reads a bare `off` as false, which is taken as "off") gives the startup defaults.
+  `/mode main|scalper|both` and `/scalper off|tick|intraday|swing` change them while the
+  bot runs (stored as `switch.strategies` / `switch.scalper_mode`, shared by paper and
+  live like approvals); the dashboard's Control tab sends the same commands. With
+  `/mode scalper` main setups are alerts only ("the main strategy is switched off");
+  monitoring of A+ candidates goes on. `scalper.enabled` is gone: the switch decides.
+  `scalping/modes.py` holds each mode's state: none is built yet, so selecting one says
+  "not built yet (phase S3/S4/S5): nothing runs", and `/approve scalper <mode>` refuses
+  until the mode is built and has passed. `/status` and the dashboard snapshot show it.
+- **Tick recorder.** `BrokerClient.get_ticks` (MT5: `copy_ticks_range` with bid/ask
+  changes, server time converted to UTC like bars; the mock: four ticks a minute). The
+  bot's `tick_job` (each minute at :30, under the trading lock) saves each finished
+  hour, a minute after it ends, to `data/ticks/<symbol>/<YYYY-MM-DD>/<HH>.npz`; on the
+  first start it fetches the broker's last 14 days, 12 hours a call; a broker error
+  retries the same hour; hours without ticks leave no file; `ticks.keep_days` (0 =
+  keep all) prunes. Checked read-only on the real terminal: 36,413 ticks in Friday
+  13:00-14:00, about 0.3 MB an hour.
+- **Latency.** `TerminalInfo.ping_ms` (MT5's `ping_last`) is shown by `--check` and
+  `/status`; every `order_send` is timed and stored in `order_log.elapsed_ms`
+  (migration 7); `/status` shows the median of the last 20.
+- **Costs.** `backtest.costs.commission_per_lot: 0.0` in config.yaml (also used by paper
+  trading and the shadow book); the built-in default stays 7.00 for other accounts.
+  Tests pinned to the old figures now read +228.70 / +4.79 R for the textbook trade.
+  Acceptance backtest, 2024-01-01..2026-10-31: the same 55 trades, 36.4% won, profit
+  factor 2.43 (was 2.40), +0.94 R a trade (was +0.93), +27.1% (was +26.7%), max
+  drawdown 2.9%; walk-forward 45 out-of-sample trades at +0.90 R (was +0.89).

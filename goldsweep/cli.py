@@ -250,7 +250,8 @@ def _report_broker(
         _kv(
             "Terminal",
             f"{terminal.name} build {terminal.build} ({terminal.company}); "
-            f"server link {link}; algo trading {algo}",
+            f"server link {link}; algo trading {algo}"
+            + (f"; ping {terminal.ping_ms:g} ms" if terminal.ping_ms is not None else ""),
         )
     )
     emit(_kv("Account", f"{account.login} @ {account.server}  [{account.account_type.value}]"))

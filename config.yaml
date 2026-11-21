@@ -202,7 +202,10 @@ backtest:
     fixed_spread_points: 25
     extra_spread_points: 0
     slippage_points: 10         # market entries and stop-loss exits
-    commission_per_lot: 7.0     # round trip, account currency
+    # Round trip, account currency. 0: the Exness standard account (XAUUSDm) charges
+    # none, its cost is the spread (122 demo deals, D107/D108). Raw-spread or ECN
+    # accounts charge one: set it from your broker's deals.
+    commission_per_lot: 0.0
   walk_forward:
     train_months: 6
     test_months: 2
@@ -295,11 +298,26 @@ confluence:
     symbol_candidates: [XAGUSD, XAGUSD.m, XAGUSDm, SILVER]
     lookback_bars: 24
 
-# The M1 scalper add-on (docs/SCALPER_SPEC.md, docs/SCALPER_PLAN.md, D88-D99). It runs
-# alongside the main strategy, never instead of it. Off: phase S1 only tests it.
+# Which strategies may open trades, and the scalper's mode (D103). These are the
+# startup defaults; /mode and /scalper on Telegram (or the dashboard) change them
+# while the bot runs. A scalper mode trades only after its evidence test and
+# /approve scalper <mode>; until then it runs on paper, and unbuilt modes do nothing.
+switch:
+  strategies: main               # main | scalper | both
+  scalper_mode: "off"            # "off" | tick | intraday | swing (quote "off")
+
+# The tick recorder (D106): every gold tick from the broker, saved in data/ticks/
+# (about 0.3 MB a busy hour, 5-8 MB a trading day), to test the tick mode on ticks
+# of our own.
+ticks:
+  record: true
+  keep_days: 0                   # 0 keeps every day
+
+# The scalper add-on's settings (docs/SCALPER_SPEC.md, docs/SCALPER_MODES.md, D88-D107).
+# It runs alongside the main strategy, never instead of it. S1's rules lost after
+# costs (D101); they are the intraday mode's first candidate.
 # python -m goldsweep.scalping.backtest --from 2024-01-01 --to 2026-10-31
 scalper:
-  enabled: false
   timeframe: M1
   strategy: sweep_reclaim        # sweep_reclaim | trail_rejection
   sessions: [asia, london, newyork, overlap]

@@ -249,7 +249,7 @@ def order_logger(db: Database, clock: Clock) -> Any:
     ) -> None:
         db.execute(
             "INSERT INTO order_log (time, signal_id, action, ok, retcode, ticket, message, "
-            "request) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "request, elapsed_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 int(ensure_utc(clock.now()).timestamp()),
                 signal_id,
@@ -259,6 +259,7 @@ def order_logger(db: Database, clock: Clock) -> Any:
                 result.ticket or None,
                 result.message,
                 json.dumps(request, default=str),
+                result.elapsed_ms,
             ),
         )
 

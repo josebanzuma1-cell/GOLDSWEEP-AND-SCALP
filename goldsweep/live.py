@@ -85,6 +85,9 @@ from goldsweep.execution.executor import Executor, PaperExecutor
 from goldsweep.execution.panel import PanelWriter
 from goldsweep.execution.shadow import ShadowBook, Tally, fingerprint
 from goldsweep.risk.risk_manager import NewsEvent
+from goldsweep.scalping import modes as scalper_modes
+from goldsweep.scalping.modes import MODE_NAMES
+from goldsweep.scalping.ticks import TickRecorder, tick_folder
 from goldsweep.storage.db import Database
 
 log = get_logger(__name__)
@@ -98,7 +101,14 @@ HEARTBEAT_KEY = "dashboard.heartbeat"
 HEARTBEAT_EVERY = dt.timedelta(seconds=10)
 #: Dashboard commands older than this are not carried out (the bot was not running).
 COMMAND_MAX_AGE = dt.timedelta(minutes=2)
-DASHBOARD_COMMANDS = ("pause", "resume", "stop", "status")
+#: The strategy and scalper-mode switch (D103), as "name:argument" for the dashboard.
+SWITCH_COMMANDS = (
+    "mode:main",
+    "mode:scalper",
+    "mode:both",
+    *(f"scalper:{mode}" for mode in ("off", *MODE_NAMES)),
+)
+DASHBOARD_COMMANDS = ("pause", "resume", "stop", "status", *SWITCH_COMMANDS)
 #: M5 bars kept in SQLite for the dashboard chart.
 CANDLES_KEPT = 300
 DUPLICATE_WINDOW = dt.timedelta(hours=12)
@@ -119,6 +129,13 @@ CONTEXT_HOURS = 2000
 #: decision about a strategy, not about one mode.
 APPROVED_KEY = "playbooks.approved"
 ASKED_KEY = "playbooks.asked"
+#: The switch (D103): which strategies may trade and the scalper's mode, as changed
+#: on Telegram or the dashboard (config.yaml ``switch:`` until then); and the scalper
+#: modes the owner approved for trading. Shared by paper and live, like approvals.
+STRATEGIES_KEY = "switch.strategies"
+SCALPER_MODE_KEY = "switch.scalper_mode"
+SCALPER_APPROVED_KEY = "scalper.approved"
+STRATEGY_CHOICES = ("main", "scalper", "both")
 MEDIAN_SPREAD_MIN_SAMPLES = 30
 EXIT_OK, EXIT_BROKER, EXIT_REFUSED, EXIT_NOT_CONFIRMED = 0, 1, 2, 3
 
@@ -262,6 +279,20 @@ class Trader:
         self._silver = self._resolve_silver(broker)
         #: Monitored A+ setups, traded on paper only (D87).
         self._shadow = ShadowBook(settings, self.spec, db)
+        #: Every gold tick, saved for testing the scalper's tick mode (D106).
+        ticks = self._config.ticks
+        self.ticks = (
+            TickRecorder(
+                broker,
+                self.spec.name,
+                tick_folder(settings.data_dir, self.spec.name),
+                db,
+                self._clock,
+                keep_days=ticks.keep_days,
+            )
+            if ticks.record
+            else None
+        )
         saved = db.get_state(self._state_last_bar)
         self._last_bar = dt.datetime.fromisoformat(saved) if saved else None
         self._market: dict[str, Any] = {}
@@ -317,6 +348,97 @@ class Trader:
     @property
     def trading(self) -> str:
         return str(self._db.get_state(self._state_trading, ACTIVE))
+
+    # -- the switch (D103) ---------------------------------------------------------- #
+
+    @property
+    def strategies(self) -> str:
+        """main / scalper / both: which strategies may open trades."""
+        value = self._db.get_state(STRATEGIES_KEY)
+        return str(value) if value in STRATEGY_CHOICES else self._config.switch.strategies
+
+    @property
+    def scalper_mode(self) -> str:
+        """off / tick / intraday / swing."""
+        value = self._db.get_state(SCALPER_MODE_KEY)
+        if value == "off" or value in MODE_NAMES:
+            return str(value)
+        return self._config.switch.scalper_mode
+
+    def _scalper_approved(self, mode: str) -> bool:
+        return mode in self._db.get_state(SCALPER_APPROVED_KEY, [])
+
+    def _set_strategies(self, argument: str) -> str:
+        choice = argument.strip().lower()
+        if not choice:
+            return (
+                f"Strategies that may trade: {self.strategies}. "
+                "Send /mode main, /mode scalper or /mode both."
+            )
+        if choice not in STRATEGY_CHOICES:
+            return "Send /mode main, /mode scalper or /mode both."
+        self._db.set_state(STRATEGIES_KEY, choice)
+        log.info("strategies switched", strategies=choice)
+        if choice == "main":
+            return "✅ Only the main strategy may open trades; the scalper does not trade."
+        note = self._scalper_note()
+        if choice == "scalper":
+            return f"✅ Only the scalper may open trades; main setups are alerts only.{note}"
+        return f"✅ Both strategies may open trades, side by side.{note}"
+
+    def _scalper_note(self) -> str:
+        mode = self.scalper_mode
+        if mode == "off":
+            return " The scalper's mode is off: send /scalper tick, intraday or swing."
+        info = scalper_modes.REGISTRY[mode]
+        if not info.built:
+            return f" Its {mode} mode is not built yet (phase {info.phase}): nothing runs."
+        if not (info.passed and self._scalper_approved(mode)):
+            return f" Its {mode} mode runs on paper only until it passes and is approved."
+        return ""
+
+    def _set_scalper_mode(self, argument: str) -> str:
+        choice = argument.strip().lower()
+        if not choice:
+            return (
+                f"Scalper mode: {self._scalper_line()}. Send /scalper off, tick, intraday or swing."
+            )
+        if choice != "off" and choice not in MODE_NAMES:
+            return "Send /scalper off, /scalper tick, /scalper intraday or /scalper swing."
+        self._db.set_state(SCALPER_MODE_KEY, choice)
+        log.info("scalper mode switched", mode=choice)
+        if choice == "off":
+            return "✅ Scalper off: no scalper mode runs."
+        line = scalper_modes.describe(
+            choice, selected=choice, approved=self._scalper_approved(choice)
+        )
+        if self.strategies == "main":
+            line += ". The scalper may not trade while /mode is main"
+        return f"✅ Scalper mode: {line}."
+
+    def _scalper_line(self) -> str:
+        mode = self.scalper_mode
+        if mode == "off":
+            return "off"
+        return scalper_modes.describe(mode, selected=mode, approved=self._scalper_approved(mode))
+
+    def _approve_scalper(self, mode: str) -> str:
+        """``/approve scalper <mode>``: only a mode whose evidence test passed (D103)."""
+        if mode not in MODE_NAMES:
+            return "Send /approve scalper tick, intraday or swing."
+        info = scalper_modes.REGISTRY[mode]
+        if not info.built:
+            return f"The {mode} mode is not built yet (phase {info.phase}): nothing to approve."
+        if not info.passed:
+            return (
+                f"Not approved: the {mode} mode has not passed its evidence test, so it can "
+                "only run on paper."
+            )
+        approved = list(self._db.get_state(SCALPER_APPROVED_KEY, []))
+        if mode not in approved:
+            approved.append(mode)
+            self._db.set_state(SCALPER_APPROVED_KEY, approved)
+        return f"✅ The scalper's {mode} mode is approved for trading when it is selected."
 
     def _set_trading(self, state: str) -> None:
         self._db.set_state(self._state_trading, state)
@@ -486,6 +608,7 @@ class Trader:
                     "orders": [plan.to_state() for plan in self.executor.pending_orders],
                     "risk": self.executor.manager.status(now),
                     "armed": self.executor.armed,
+                    "switch": {"strategies": self.strategies, "scalper": self._scalper_line()},
                 },
             )
         except Exception as exc:  # noqa: BLE001 - the dashboard is a viewer only
@@ -600,6 +723,8 @@ class Trader:
             action, text = "alert", f"alert only: trading is {self.trading}"
         elif not execution.auto_trade:
             action, text = "alert", "alert only: auto_trade is off"
+        elif self.strategies == "scalper":
+            action, text = "alert", "alert only: the main strategy is switched off (/mode)"
         elif (refusal := self._playbook_refusal(signal)) is not None:
             action, text = "alert", f"alert only: {refusal}"
         elif self._config.strategy.refinement.mode == "m1":
@@ -845,7 +970,13 @@ class Trader:
         self._db.set_state(ASKED_KEY, asked)
 
     def _approve(self, argument: str) -> str:
-        """``/approve <session>``: a confirmed candidate trades through the executor."""
+        """``/approve <session>``: a confirmed candidate trades through the executor.
+
+        ``/approve scalper <mode>`` approves a scalper mode instead (D103).
+        """
+        first, _, rest = argument.strip().partition(" ")
+        if first.lower() == "scalper":
+            return self._approve_scalper(rest.strip().lower())
         playbook = parse_playbook(argument)
         if playbook is None:
             return "Send /approve asia, /approve london or /approve newyork."
@@ -1024,6 +1155,37 @@ class Trader:
             if events:
                 self._write_snapshot(now)
 
+    def latency_line(self) -> str:
+        """The terminal's ping and recent order round trips (S2), when known."""
+        parts: list[str] = []
+        try:
+            ping = self._broker.terminal_info().ping_ms
+        except BrokerError:
+            ping = None
+        if ping is not None:
+            parts.append(f"ping {ping:g} ms")
+        times = [
+            float(value)
+            for (value,) in self._db.query(
+                "SELECT elapsed_ms FROM order_log WHERE elapsed_ms IS NOT NULL "
+                "ORDER BY id DESC LIMIT 20"
+            )
+        ]
+        if times:
+            middle = sorted(times)[len(times) // 2]
+            parts.append(f"orders {middle:g} ms (median of the last {len(times)})")
+        return ", ".join(parts)
+
+    def tick_job(self) -> None:
+        """Each minute: save the finished hours of ticks (D106). Never stops trading."""
+        if self.ticks is None:
+            return
+        try:
+            with self._lock:
+                self.ticks.record()
+        except Exception as exc:  # noqa: BLE001 - recording must never stop trading
+            log.error("tick recorder failed", error=repr(exc))
+
     def sync_job(self) -> None:
         try:
             self.sync()
@@ -1043,9 +1205,13 @@ class Trader:
                 reply = self._approve(command.argument)
             elif command.name == "revoke":
                 reply = self._revoke(command.argument)
+            elif command.name == "mode":
+                reply = self._set_strategies(command.argument)
+            elif command.name == "scalper":
+                reply = self._set_scalper_mode(command.argument)
             else:
                 reply = self._handle(command.name)
-            if command.name in ("pause", "resume", "stop", "golive"):
+            if command.name in ("pause", "resume", "stop", "golive", "mode", "scalper"):
                 self._write_snapshot(ensure_utc(self._clock.now()))
             return reply
 
@@ -1106,10 +1272,12 @@ class Trader:
                     if name not in DASHBOARD_COMMANDS:
                         self._finish(command_id, "done", messages.HELP)
                         continue
-                    reply = self.handle(Command(name, "", 0))
+                    base, _, argument = name.partition(":")  # "mode:both" -> /mode both
+                    reply = self.handle(Command(base, argument, 0))
                     self._finish(command_id, "done", reply)
                     if name != "status":
-                        self._send(f"🖥 Dashboard /{name}: {reply}")
+                        shown = f"{base} {argument}".strip()
+                        self._send(f"🖥 Dashboard /{shown}: {reply}")
             finally:
                 self._lock.release()
         except Exception as exc:  # noqa: BLE001 - keep the loop alive; the error is logged
@@ -1215,6 +1383,10 @@ class Trader:
             waiting = ", ".join(f"{s.id} until {s.expires_at:%H:%M} UTC" for s in armed)
             text += f"\nWaiting for an M1 entry: {waiting}"
         text += "\n" + "\n".join(self._playbook_lines())
+        text += f"\nStrategies that may trade: {self.strategies} | scalper: {self._scalper_line()}"
+        latency = self.latency_line()
+        if latency:
+            text += f"\nLatency: {latency}"
         monitored = [p.id for p in self._shadow.orders] + [p["id"] for p in self._shadow.positions]
         if monitored:
             text += f"\nMonitored now (paper only): {', '.join(monitored)}"
@@ -1457,6 +1629,13 @@ def _schedule(trader: Trader, settings: Settings, bot: TelegramBot | None, clock
         max_instances=1,
         coalesce=True,
     )
+    if trader.ticks is not None:
+        scheduler.add_job(
+            trader.tick_job,
+            CronTrigger(minute="*", second=30, timezone=UTC),  # clear of the bar job
+            max_instances=1,
+            coalesce=True,
+        )
     if alerts.heartbeat_minutes > 0:
         scheduler.add_job(
             trader.heartbeat_job,

@@ -343,5 +343,7 @@ HELP = (
     "stay managed), /resume, /stop (kill switch: close everything and stop trading "
     "until /resume), /golive <account> (after an unattended start: allow live orders), "
     "/approve <session> (a session's A+ playbook trades, after its monitoring), "
-    "/revoke <session> (back to monitoring), /help"
+    "/revoke <session> (back to monitoring), /mode main|scalper|both (which strategies "
+    "may trade), /scalper off|tick|intraday|swing (the scalper's mode), "
+    "/approve scalper <mode> (after its evidence test), /help"
 )

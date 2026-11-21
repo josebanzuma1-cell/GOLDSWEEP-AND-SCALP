@@ -128,7 +128,7 @@ def test_heartbeat_message(settings: Settings, db: Database) -> None:
     h.run_until(utc(2026, 11, 17, 8, 40))
     h.trader.heartbeat_job()
     beat = h.notes.sent[-1]
-    assert beat.startswith("💓 GoldSweep PAPER running | trading active | equity 10,227.51")
+    assert beat.startswith("💓 GoldSweep PAPER running | trading active | equity 10,228.70")
     assert "open trades 0 | last bar 08:35 UTC" in beat
 
 

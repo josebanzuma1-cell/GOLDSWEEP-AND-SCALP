@@ -802,10 +802,45 @@ class ScalperRiskConfig(_StrictModel):
     cost_multiple: float = Field(default=2.0, ge=0, le=20)
 
 
-class ScalperConfig(_StrictModel):
-    """The M1 scalper add-on (docs/SCALPER_SPEC.md, D88-D99). Off until approved."""
+ScalperMode = Literal["off", "tick", "intraday", "swing"]
+StrategyChoice = Literal["main", "scalper", "both"]
 
-    enabled: bool = False
+
+def _off_if_false(value: Any) -> Any:
+    """YAML reads an unquoted ``off`` as False; take it to mean "off"."""
+    return "off" if value is False else value
+
+
+class SwitchConfig(_StrictModel):
+    """Which strategies may open trades, and the scalper's mode (D103).
+
+    These are the defaults at startup; ``/mode`` and ``/scalper`` on Telegram (or the
+    dashboard) change them while the bot runs, and the change is kept in the database.
+    """
+
+    strategies: StrategyChoice = "main"
+    scalper_mode: ScalperMode = "off"
+
+    @field_validator("scalper_mode", mode="before")
+    @classmethod
+    def _unquoted_off(cls, value: Any) -> Any:
+        return _off_if_false(value)
+
+
+class TicksConfig(_StrictModel):
+    """The tick recorder (D106): every gold tick saved, for testing the tick mode."""
+
+    record: bool = True
+    #: Days of recorded ticks kept (0 keeps them all).
+    keep_days: int = Field(default=0, ge=0, le=3650)
+
+
+class ScalperConfig(_StrictModel):
+    """The scalper add-on's settings (docs/SCALPER_SPEC.md, D88-D107).
+
+    Whether it runs, and in which mode, is the ``switch:`` block's choice.
+    """
+
     timeframe: Literal["M1", "M5"] = "M1"
     strategy: ScalpStrategy = "sweep_reclaim"
     #: Session windows (as in ``sessions:``) in which scalps may open.
@@ -874,6 +909,8 @@ class AppConfig(_StrictModel):
     confluence: ConfluenceConfig = ConfluenceConfig()
     playbooks: PlaybooksConfig = PlaybooksConfig()
     scalper: ScalperConfig = ScalperConfig()
+    switch: SwitchConfig = SwitchConfig()
+    ticks: TicksConfig = TicksConfig()
     display_timezone: ZoneName = "Africa/Kampala"
 
     @model_validator(mode="after")

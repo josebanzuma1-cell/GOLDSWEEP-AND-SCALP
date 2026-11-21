@@ -117,19 +117,19 @@ def test_the_textbook_setup_is_traded_on_paper(settings: Settings, db: Database)
     assert "Pressure: Buyers" in alert
     assert filled.startswith("✅ PAPER LONG 2026-11-17-LDN-01 filled at 2028.90, 0.17 lots")
     assert "stop moved to breakeven at 2028.90" in breakeven
-    assert "TP1 hit, 0.08 lots closed at 2036.00 (+$56.24)" in tp1
+    assert "TP1 hit, 0.08 lots closed at 2036.00 (+$56.80)" in tp1
     # The same result as the backtester: one shared trade book.
-    assert closed.startswith("🏁 PAPER LONG 2026-11-17-LDN-01 closed (tp2) at 2048.00: +$227.51")
+    assert closed.startswith("🏁 PAPER LONG 2026-11-17-LDN-01 closed (tp2) at 2048.00: +$228.70")
     # The monitored copy is traded by the same rules, so it ends the same way.
     assert db.query("SELECT playbook, exit_reason, round(r_multiple, 2) FROM shadow_trades") == [
-        ("london", "tp2", 4.77)
+        ("london", "tp2", 4.79)
     ]
     assert db.query("SELECT id, action FROM signals") == [("2026-11-17-LDN-01", "traded")]
     (row,) = db.query("SELECT exit_reason, round(net_pnl, 2), lots FROM paper_trades")
-    assert row == ("tp2", 227.51, 0.17)
-    assert h.trader.executor.equity == pytest.approx(10_227.51)
+    assert row == ("tp2", 228.70, 0.17)
+    assert h.trader.executor.equity == pytest.approx(10_228.70)
     status = h.trader.status()
-    assert "Equity 10,227.51 | today 1 trade(s), +$227.51" in status
+    assert "Equity 10,228.70 | today 1 trade(s), +$228.70" in status
     assert "No open positions or entry orders." in status
 
 
@@ -170,7 +170,7 @@ def test_a_restart_in_the_middle_of_a_trade_resumes_it(settings: Settings, db: D
     assert len(h.trader.executor.open_positions) == 1
     h.run_until(utc(2026, 11, 17, 8, 40))
     (row,) = db.query("SELECT exit_reason, round(net_pnl, 2) FROM paper_trades")
-    assert row == ("tp2", 227.51)  # the same outcome as without the restart
+    assert row == ("tp2", 228.70)  # the same outcome as without the restart
 
 
 def test_bars_missed_while_down_are_applied_in_order(settings: Settings, db: Database) -> None:
@@ -470,7 +470,7 @@ def test_daily_summary(settings: Settings, db: Database) -> None:
     h.trader.daily_summary()
     (summary,) = h.notes.sent
     assert summary.startswith("📊 Daily summary 2026-11-17 (PAPER)")
-    assert "Trades: 1 (1 won, 0 lost) | net +$227.51 (+4.77 R) | equity 10,227.51" in summary
+    assert "Trades: 1 (1 won, 0 lost) | net +$228.70 (+4.79 R) | equity 10,228.70" in summary
     assert "Signals: traded 1" in summary
     assert "losses are part of the plan" in summary
 
@@ -585,6 +585,7 @@ def test_run_paper_starts_and_stops(settings: Settings, monkeypatch: pytest.Monk
         "news_tick",
         "daily_summary",
         "dashboard_job",
+        "tick_job",  # the tick recorder (D106)
         "heartbeat_job",
         "housekeeping_job",
     ]

@@ -165,6 +165,7 @@ def test_built_in_defaults_equal_the_shipped_config(settings: Settings, tmp_path
     spec_values = {key: spec for key, (spec, _) in OWNER_CHANGES.items()}
     spec_risk = {key: spec for key, (spec, _) in OWNER_RISK_CHANGES.items()}
     windows = settings.config.sessions
+    backtest = settings.config.backtest
     shipped = settings.config.model_copy(
         update={
             "mode": Mode.PAPER,
@@ -183,10 +184,29 @@ def test_built_in_defaults_equal_the_shipped_config(settings: Settings, tmp_path
                     for name in ("asia", "london", "newyork")
                 }
             ),
+            # D108: this account charges no commission; the built-in default (an
+            # ECN-style 7.00 a lot) stays the cautious value for other accounts.
+            "backtest": backtest.model_copy(
+                update={"costs": backtest.costs.model_copy(update={"commission_per_lot": 7.0})}
+            ),
         }
     )
     assert shipped.playbooks == PlaybooksConfig()
+    assert settings.config.backtest.costs.commission_per_lot == 0.0
     assert load(write_text(tmp_path, "")).config == shipped
+
+
+def test_the_switch_and_the_tick_recorder_settings(settings: Settings, tmp_path: Path) -> None:
+    switch, ticks = settings.config.switch, settings.config.ticks
+    assert (switch.strategies, switch.scalper_mode) == ("main", "off")
+    assert (ticks.record, ticks.keep_days) == (True, 0)
+    # YAML reads a bare off as False: it still means "off".
+    unquoted = load(write_text(tmp_path, "switch:\n  scalper_mode: off\n")).config.switch
+    assert unquoted.scalper_mode == "off"
+    with pytest.raises(ConfigError, match="scalper_mode"):
+        load(write_text(tmp_path, "switch:\n  scalper_mode: hft\n"))
+    with pytest.raises(ConfigError, match="strategies"):
+        load(write_text(tmp_path, "switch:\n  strategies: all\n"))
 
 
 def test_config_is_immutable(settings: Settings) -> None:
