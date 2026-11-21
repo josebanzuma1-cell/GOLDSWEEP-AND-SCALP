@@ -480,10 +480,14 @@ class Trader:
     ) -> PressureReading | None:
         signal = self._numbered(signal)
         blackouts = self._news.blackouts(now) if self._news else []
-        plan = TradePlan.from_signal(signal, tp3_r=self._config.risk.tp3_r).with_deadline(
-            sessions=self._sessions,
-            events=blackouts,
-            blackout_before_min=self._config.news.blackout_before_min,
+        plan = (
+            TradePlan.from_signal(signal, tp3_r=self._config.risk.tp3_r)
+            .with_exit_targets(self._config.risk)
+            .with_deadline(
+                sessions=self._sessions,
+                events=blackouts,
+                blackout_before_min=self._config.news.blackout_before_min,
+            )
         )
         execution = self._config.execution
         traded = blocked = False
@@ -548,6 +552,7 @@ class Trader:
                 now=now,
                 mode=self.label,
                 take_profit_3=plan.take_profit_3,
+                plan=plan,
             )
         )
         self._report(follow_up)
@@ -646,10 +651,14 @@ class Trader:
 
     def _place_refined(self, setup: RefineSetup, result: RefineResult, now: dt.datetime) -> None:
         blackouts = self._news.blackouts(now) if self._news else []
-        plan = refined_plan(setup, result, tp3_r=self._config.risk.tp3_r).with_deadline(
-            sessions=self._sessions,
-            events=blackouts,
-            blackout_before_min=self._config.news.blackout_before_min,
+        plan = (
+            refined_plan(setup, result, tp3_r=self._config.risk.tp3_r)
+            .with_exit_targets(self._config.risk)
+            .with_deadline(
+                sessions=self._sessions,
+                events=blackouts,
+                blackout_before_min=self._config.news.blackout_before_min,
+            )
         )
         follow_up: list[BookEvent] = []
         traded = False

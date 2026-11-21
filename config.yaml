@@ -161,12 +161,16 @@ risk:
   daily_loss_limit_pct: 2.0
   weekly_loss_limit_pct: 5.0
   max_consecutive_losses: 3
-  breakeven_at_r: 1.0
+  breakeven_at_r: 0              # spec 1.0; 0 = only when TP1 is reached (owner, D84)
   # Spec 7b: each trade is split into up to three positions with the same entry
   # and stop: 50% to TP1 (nearest pool), 30% to TP2 (next pool), the rest to TP3.
   partial_close_at_tp1_pct: 50
   partial_close_at_tp2_pct: 30
   tp3_r: 3.0     # TP3 this many R from the entry; 0 = no TP3 (its share goes to TP2)
+  # pools: targets at the liquidity pools (above). fixed_r: at fixed_targets_r R from
+  # the entry instead; one value closes everything there, more values split (D84).
+  target_mode: pools
+  fixed_targets_r: [3.0]
   max_trades_per_session: 2
   # Spread filter: no new trade while the spread is above 2x its 20-day median.
   max_spread_multiple: 2.0

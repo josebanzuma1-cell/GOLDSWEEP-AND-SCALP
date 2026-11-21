@@ -29,7 +29,7 @@ review after each one.
 | 6 | Live execution on a demo account, three-target split, on-chart panel | built, tested, approved |
 | 7 | Streamlit dashboard: chart, scenarios, news, trades, risk, equity, backtests, kill switch | built, tested, approved |
 | 8 | Unattended running (Task Scheduler, /golive), heartbeat, watchdog, backups, VPS guide | built, tested, approved |
-| 9 | More trades and "sniper" entries: (1) entries that fill and never wait into a blocked time, (2) M1 refinement, (3) more setup models | stage 1 approved; stage 2 built and tested (left off, D83), awaiting approval |
+| 9 | More trades and "sniper" entries: (1) entries that fill and never wait into a blocked time, (2) M1 refinement, (3) more setup models | stages 1 and 2 done (M1 refinement left off, D83); exit rule changed to breakeven only at TP1 (D84); stage 3 next |
 
 Only `python main.py --live` sends orders to a broker, and only after
 `MODE=LIVE` in `.env`, `mode: LIVE` in `config.yaml` and the account number typed
@@ -256,9 +256,11 @@ What happens to a signal that clears the auto-trade threshold (spec 7b):
   reaches TP1 first, or before any time a new trade is not allowed: a news
   blackout, the rollover block, the Friday cutoff or the weekend. The alert says
   so ("valid until 16:45 UTC (before the rollover block)"); paper trading and the
-  backtester follow the same rule. When TP1 is hit, or price has gone 1R in favour, the other parts' stops
-  move to breakeven; after TP1 they trail behind M5 swing points. As a high-impact
-  release's blackout starts, a trade 1R up moves its stop to breakeven too.
+  backtester follow the same rule. When TP1 is hit, the other parts' stops move
+  to breakeven; after TP1 they trail behind M5 swing points. (The spec also moved
+  them at +1R in favour; on 2024-2026 that closed many trades at zero just before
+  they ran, so `risk.breakeven_at_r` is 0: see D84.) As a high-impact release's
+  blackout starts, a trade 1R up moves its stop to breakeven too.
 - Every request and the broker's answer is stored in the `order_log` table;
   finished trades in `live_trades`. Telegram reports each placement, fill, target,
   stop, breakeven move and close. `/stop` closes every GoldSweep position at once.

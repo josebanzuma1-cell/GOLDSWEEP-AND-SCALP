@@ -316,6 +316,34 @@ def test_entry_order_expires_after_six_bars(base_signal: Signal) -> None:
     assert outcome.outcome is Outcome.EXPIRED
 
 
+def test_a_fixed_3r_target_lets_a_trade_run_past_the_pool(base_signal: Signal) -> None:
+    # Entry 2029.00, stop 2027.00 (R = 2.00): 3R is 2035.00, beyond the 2033.00 pool.
+    rows = [QUIET, FILL, TO_1R, TO_TP1, (2033.0, 2035.2, 2032.9, 2035.0)]
+    pools = only_trade(simulate(rows, [make_signal(base_signal)], risk=TWO_TARGETS))
+    fixed = only_trade(
+        simulate(
+            rows,
+            [make_signal(base_signal)],
+            risk=RiskConfig(tp3_r=0, target_mode="fixed_r", fixed_targets_r=(3.0,)),
+        )
+    )
+    assert [leg.reason for leg in fixed.legs] == [ExitReason.TP1]  # everything at 3R
+    assert fixed.legs[0].exit_price == 2035.0 and fixed.r_multiple == pytest.approx(3.0)
+    assert pools.legs[0].exit_price == 2033.0  # the pool target took the first half at 2R
+
+
+def test_breakeven_later_or_only_at_tp1(base_signal: Signal) -> None:
+    # +1R is reached, then price comes back to the entry and only later runs to TP2.
+    back: Row = (2031.0, 2031.1, 2028.95, 2029.1)  # bid low 2028.95: below the 2029.00 entry
+    rows = [QUIET, FILL, TO_1R, back, TO_TP1, TO_TP2]
+    at_1r = only_trade(simulate(rows, [make_signal(base_signal)]))
+    assert at_1r.exit_reason is ExitReason.BREAKEVEN and at_1r.net_pnl == pytest.approx(0.0)
+    only_tp1 = only_trade(
+        simulate(rows, [make_signal(base_signal)], risk=RiskConfig(tp3_r=0, breakeven_at_r=0))
+    )
+    assert [leg.reason for leg in only_tp1.legs] == [ExitReason.TP1, ExitReason.TP2]
+
+
 def test_the_configured_entry_lifetime_replaces_the_signals_own(base_signal: Signal) -> None:
     rows = [QUIET] + [NO_FILL] * 7 + [FILL, TO_TP1]  # the dip comes 40 minutes after the signal
     assert simulate(rows, [make_signal(base_signal)]).trades == []  # 6 bars: expired at 08:25

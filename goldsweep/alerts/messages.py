@@ -99,18 +99,26 @@ def signal_alert(
     now: dt.datetime,
     mode: str,
     take_profit_3: float | None = None,
+    plan: TradePlan | None = None,
 ) -> str:
+    """``plan``, when given, supplies the targets actually used (fixed-R targets, D84)."""
     icon = "🟢" if traded else ("⛔" if blocked else "🟡")
-    rr2 = f" / {signal.risk_reward_2:.1f}" if signal.risk_reward_2 is not None else ""
+    tp1, tp2, rr1 = signal.take_profit_1, signal.take_profit_2, signal.risk_reward_1
+    rr2_value = signal.risk_reward_2
+    if plan is not None:
+        tp1, tp2, take_profit_3 = plan.take_profit_1, plan.take_profit_2, plan.take_profit_3
+        rr1 = plan.risk_reward_1
+        rr2_value = abs(tp2 - plan.entry) / plan.risk_distance if tp2 is not None else None
+    rr2 = f" / {rr2_value:.1f}" if rr2_value is not None else ""
     risk = f"Risk {risk_pct:g}%" + (f" ({lots:g} lots)" if lots else "")
     lines = [
         f"{icon} {signal.symbol} {signal.direction.value} setup (score {signal.score:.1f}) "
         f"— {session_name(signal.session)}",
         f"Swept: {signal.pool.label} {signal.pool.price:.2f} → MSS confirmed (M5)",
         f"Entry: {signal.entry:.2f} ({entry_text(signal)}) | SL: {signal.stop_loss:.2f} | "
-        f"TP1: {signal.take_profit_1:.2f} | TP2: {_price(signal.take_profit_2)}"
+        f"TP1: {tp1:.2f} | TP2: {_price(tp2)}"
         + (f" | TP3: {take_profit_3:.2f}" if take_profit_3 is not None else ""),
-        f"R:R {signal.risk_reward_1:.1f}{rr2} | {risk}",
+        f"R:R {rr1:.1f}{rr2} | {risk}",
         news_line(bias, next_event, now),
     ]
     if pressure is not None:

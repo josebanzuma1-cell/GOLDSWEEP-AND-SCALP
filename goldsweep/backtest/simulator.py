@@ -380,7 +380,9 @@ class Simulator:
                     result.outcomes.append(SignalOutcome(record, outcome, decision.detail))
                     continue
                 order = self._with_deadline(
-                    refined_plan(setup, decision, tp3_r=self._risk_cfg.tp3_r)
+                    refined_plan(setup, decision, tp3_r=self._risk_cfg.tp3_r).with_exit_targets(
+                        self._risk_cfg
+                    )
                 )
                 heapq.heappush(refined, (to_ns(order.time), next_signal, record, order))
             while refined and refined[0][0] <= close_ns:
@@ -422,8 +424,11 @@ class Simulator:
         record: SignalRecord,
         lifetime: Callable[[SignalRecord], dt.timedelta | None] | None,
     ) -> TradePlan:
-        """The signal's order: its configured lifetime, cut before any blocked time."""
-        plan = TradePlan.from_signal(record.signal, tp3_r=self._risk_cfg.tp3_r)
+        """The signal's order: its configured targets and lifetime, cut before any
+        blocked time."""
+        plan = TradePlan.from_signal(record.signal, tp3_r=self._risk_cfg.tp3_r).with_exit_targets(
+            self._risk_cfg
+        )
         span = lifetime(record) if lifetime is not None else self._lifetime
         if span is not None and plan.entry_mode != "market":
             plan = dataclasses.replace(plan, expires_at=plan.time + span)

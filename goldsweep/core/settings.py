@@ -474,18 +474,37 @@ class RiskConfig(_StrictModel):
     daily_loss_limit_pct: float = Field(default=2.0, gt=0, le=20)
     weekly_loss_limit_pct: float = Field(default=5.0, gt=0, le=50)
     max_consecutive_losses: int = Field(default=3, ge=1, le=20)
-    breakeven_at_r: float = Field(default=1.0, gt=0, le=10)
+    #: The stop moves to the entry once price has gone this many R in favour
+    #: (0: never by distance). Reaching TP1 always moves it too (spec 7b).
+    breakeven_at_r: float = Field(default=1.0, ge=0, le=10)
     #: Spec 7b split: this share closes at TP1, the next at TP2 (at most what TP1
     #: leaves), the rest at TP3.
     partial_close_at_tp1_pct: float = Field(default=50, ge=0, le=100)
     partial_close_at_tp2_pct: float = Field(default=30, ge=0, le=100)
     #: TP3 sits this many R from the entry (0: no TP3; its share goes to TP2).
     tp3_r: float = Field(default=3.0, ge=0, le=20)
+    #: pools: TP1 / TP2 at the next liquidity pools, TP3 at tp3_r (the spec).
+    #: fixed_r: the targets sit at fixed_targets_r R from the entry instead (D84).
+    target_mode: Literal["pools", "fixed_r"] = "pools"
+    #: One to three R multiples, nearest first: one value closes everything there;
+    #: more values split the position as partial_close_at_tp1_pct / _tp2_pct say.
+    fixed_targets_r: tuple[float, ...] = (3.0,)
     max_trades_per_session: int = Field(default=2, ge=1, le=50)
     #: Spread filter: no new trade while the spread is above this multiple of the
     #: usual spread, measured as the median over ``spread_median_days`` days.
     max_spread_multiple: float = Field(default=2.0, gt=1, le=20)
     spread_median_days: int = Field(default=20, ge=1, le=365)
+
+    @field_validator("fixed_targets_r")
+    @classmethod
+    def _increasing_targets(cls, value: tuple[float, ...]) -> tuple[float, ...]:
+        if not 1 <= len(value) <= 3:
+            raise ValueError("fixed_targets_r needs one to three values")
+        if any(k <= 0 or k > 20 for k in value):
+            raise ValueError("fixed_targets_r values must be above 0 and at most 20")
+        if any(b <= a for a, b in zip(value, value[1:], strict=False)):
+            raise ValueError("fixed_targets_r must rise from the nearest target to the farthest")
+        return value
 
 
 class PressureWeights(_StrictModel):

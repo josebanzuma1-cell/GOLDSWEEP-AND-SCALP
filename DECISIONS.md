@@ -1096,3 +1096,62 @@ in two of the three years. The plain M5 entry is steadier: positive or flat in
 every year. On this history the sniper entry does not earn its place; it stays in
 the code, tested, to be switched on only if later evidence (a longer history, or
 demo trading) says otherwise.
+
+### D84. Exit management: the +1 R breakeven move cuts winners short
+
+**Why it was tested.** The owner asked how to make the normal entry far more
+accurate (a 95% win rate). Replaying the 54 trades of 2024-2026 on M1 bars showed
+that no exit can do that: with the original stop, a target of +0.5 R would have
+been reached first 70% of the time and earned almost nothing (+0.06 R per trade),
+and 16 trades never went even +0.5 R in favour. But 44% of the trades reached +3 R
+before their stop, while only 20% ended as wins: the management was closing many
+of them at the entry before they ran.
+
+**New options** (shared by the backtester, paper and live trading):
+
+- `risk.breakeven_at_r: 0` turns off the move to breakeven by distance. Reaching
+  TP1 still moves the stop to the entry (spec 7b), as the owner asked to keep.
+- `risk.target_mode: fixed_r` with `risk.fixed_targets_r` puts the targets at fixed
+  R multiples from the entry instead of at the liquidity pools: one value closes
+  everything there, two or three split the position as
+  `partial_close_at_tp1_pct` / `_tp2_pct` say (`TradePlan.with_exit_targets`). The
+  setup itself still needs a pool at least `min_rr` away. The alert shows the
+  targets actually used.
+
+**Results, 2024-01-01 to 2026-10-31,** M1 fills, threshold 60, entries wait 24 bars,
+everything else default. A screen of 24 variants (breakeven at +1 / +2 / +3 R or
+only at TP1, by six target layouts); the best ones and today's rule then went
+through the walk-forward ("from 2024-07 on", the same fixed rule on later months):
+
+| Exit rule | Trades | Won | Per trade | Return | Max DD | Losing run | By year (R) | Without the best 3 | From 2024-07 on |
+|---|---|---|---|---|---|---|---|---|---|
+| Today: breakeven at +1 R, pools 50/30/20 | 54 | 20% | +0.47 R | +12.3% | 2.4% | 12 | +15.9 / +8.5 / +0.7 | +6.0 R | 44, 20% won, +0.40 R |
+| **Breakeven only at TP1, pools 50/30/20** | **55** | **36%** | **+0.93 R** | **+26.7%** | **2.9%** | **6** | **+18.6 / +19.8 / +12.7** | **+29.8 R** | **45, 36% won, +0.89 R** |
+| Breakeven only at TP1, all at 3 R | 51 | 45% | +0.79 R | +20.1% | 2.3% | 4 | +15.6 / +16.8 / +7.9 | +31.2 R | 41, 44% won, +0.74 R |
+| Breakeven only at TP1, all at 5 R | 53 | 34% | +1.02 R | +28.1% | 2.9% | 6 | +21.5 / +25.7 / +6.8 | +39.1 R | 44, 34% won, +1.03 R |
+| Breakeven at +3 R, pools 50/30/20 | 54 | 33% | +0.83 R | +23.6% | 3.0% | 7 | +19.7 / +11.4 / +14.0 | +24.7 R | 44, 32% won, +0.74 R |
+| Fixed 2 R, one target (any breakeven) | 51 | 43% | +0.28 R | +6.6% | 4.1% | 9 | +3.6 / +11.8 / -1.1 | +8.3 R | |
+
+**What it shows.** The pattern is the same for every target layout: the later the
+distance breakeven, the better (off > +3 R > +2 R > +1 R). Gold often comes back to
+the entry after +1 R before it runs, so the +1 R move turned trades that later
+reached their targets into zero results. Without it the win rate rose from about
+one in five to about one in three, the average result roughly doubled, the losing
+runs halved, every year was clearly positive, and the result no longer depends on
+three trades. A near fixed target (2 R) wins often but earns little: accuracy on
+its own is not the goal.
+
+**Read with care.** 24 variants were tried on the same history, so the best of
+them is flattered; in-sample the leading rule made +1.11 R per trade and +0.89 R on
+the later months. The walk-forward still never optimised (every window had fewer
+than 20 trades), samples are about 50 trades, and no historical calendar is stored.
+A trade can still lose its full 1 R until TP1 is reached; the drawdown rose from
+2.4% to 2.9%.
+
+**Decision (owner, 2026-11-21): breakeven only at TP1, with the pool targets.**
+`config.yaml` sets `breakeven_at_r: 0`; everything else is unchanged. It is the
+smallest change, the steadiest by year, and it keeps the spec's liquidity targets
+and the rule the owner asked to keep. (Fixed 3 R was the alternative for the
+highest win rate, about 45%, and the lowest drawdown, at a lower average.) The
+spec's 1.0 stays the code default; `tests/test_settings.py` lists the change. The
+acceptance backtest with this setting is in `reports/backtest_2024-01-01_2026-10-31`.

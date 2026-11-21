@@ -170,6 +170,28 @@ class TradePlan:
     def expiry_outcome(self) -> Outcome:
         return Outcome.WITHDRAWN if self.expiry_note else Outcome.EXPIRED
 
+    def with_exit_targets(self, risk: RiskConfig) -> TradePlan:
+        """This plan with the targets ``risk.target_mode`` asks for (D84).
+
+        ``pools`` keeps the liquidity targets the plan was made with; ``fixed_r`` puts
+        TP1..TP3 at ``risk.fixed_targets_r`` R from the entry instead.
+        """
+        if risk.target_mode == "pools":
+            return self
+        sign = self.direction.sign
+        r = self.risk_distance
+        levels: list[float | None] = [self.entry + sign * k * r for k in risk.fixed_targets_r]
+        levels += [None] * (3 - len(levels))
+        first = levels[0]
+        assert first is not None
+        return dataclasses.replace(
+            self,
+            take_profit_1=first,
+            take_profit_2=levels[1],
+            take_profit_3=levels[2],
+            risk_reward_1=risk.fixed_targets_r[0],
+        )
+
     def with_deadline(
         self,
         *,
@@ -388,10 +410,15 @@ def breakeven_due(
     tp1_done: bool,
     at_r: float,
 ) -> bool:
-    """True once price has gone ``at_r`` R in favour, or TP1 has been hit."""
+    """True once TP1 has been hit, or price has gone ``at_r`` R in favour (that part
+    never applies when ``at_r`` is 0)."""
+    if tp1_done:
+        return True
+    if at_r <= 0:
+        return False
     sign = 1.0 if long else -1.0
     r = abs(fill_price - initial_stop)
-    return tp1_done or (best_price - fill_price) * sign >= at_r * r - _EPSILON
+    return (best_price - fill_price) * sign >= at_r * r - _EPSILON
 
 
 def trailed_stop(

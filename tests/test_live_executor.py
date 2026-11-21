@@ -161,15 +161,24 @@ def test_stop_loss_closes_every_part(settings: Settings, db: Database) -> None:
 
 
 def test_breakeven_at_one_r_on_a_closed_bar(settings: Settings, db: Database) -> None:
-    rig = Rig(settings, db)
-    rig.submit()
-    rig.executor.sync()
-    rig.move(2655.50, minutes=2)
-    bar = rig.bar(utc(2026, 11, 18, 8, 5), 2652.0, 2655.60, 2651.0, 2655.5)  # +1R reached
-    rig.clock.set(utc(2026, 11, 18, 8, 10, 2))
-    events = rig.executor.on_bar(bar)
+    def run(breakeven_at_r: float) -> tuple[list[Any], Rig]:
+        risk = settings.config.risk.model_copy(update={"breakeven_at_r": breakeven_at_r})
+        config = settings.config.model_copy(update={"risk": risk})
+        rig = Rig(dataclasses.replace(settings, config=config), Database(":memory:"))
+        rig.submit()
+        rig.executor.sync()
+        rig.move(2655.50, minutes=2)
+        bar = rig.bar(utc(2026, 11, 18, 8, 5), 2652.0, 2655.60, 2651.0, 2655.5)  # +1R reached
+        rig.clock.set(utc(2026, 11, 18, 8, 10, 2))
+        return rig.executor.on_bar(bar), rig
+
+    events, rig = run(1.0)  # the spec's rule
     assert kinds(events) == ["stop_moved"] and events[0].price == pytest.approx(2650.21)
     assert {p.sl for p in rig.positions()} == {2650.21}
+    rig.db.close()
+    events, rig = run(0.0)  # the shipped rule (D84): only reaching TP1 moves it
+    assert events == [] and {p.sl for p in rig.positions()} == {2645.21}
+    rig.db.close()
 
 
 def test_limit_entry_fills_or_expires(settings: Settings, db: Database) -> None:

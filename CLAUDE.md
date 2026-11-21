@@ -82,6 +82,10 @@ XAUUSD-only trading assistant. The full specification is `docs/SPEC.md`
   (`Trader.refine_job`), the simulator once per setup. Refined orders are built with
   `refined_plan` and go through the same deadline rule, risk checks and executor.
   `strategy.refinement` is not part of the signal cache key.
+- **Exit targets** come from `TradePlan.with_exit_targets(risk)` (pools or fixed R,
+  D84), applied wherever a plan is made (simulator, `live.py`, refined plans), before
+  `with_deadline`. Reaching TP1 always moves the stop to breakeven (the owner's
+  rule); `breakeven_at_r: 0` only turns off the move by distance.
 - **Only `execution/mt5_gateway.py` sends orders.** Tests drive it with
   `tests/fake_mt5_trading.py` (a fake trade server); never send orders from tests.
   Real-terminal checks use `order_check` only, which validates without trading.

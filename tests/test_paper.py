@@ -96,7 +96,8 @@ def db(tmp_path: Path) -> Iterator[Database]:
 def test_the_textbook_setup_is_traded_on_paper(settings: Settings, db: Database) -> None:
     h = Harness(settings, db)
     h.run_until(utc(2026, 11, 17, 8, 40))
-    alert, filled, breakeven, tp1, closed = h.notes.sent
+    # The stop moves to breakeven when TP1 is reached (D84: not at +1 R).
+    alert, filled, tp1, breakeven, closed = h.notes.sent
     assert alert.startswith("🟢 XAUUSD LONG setup (score 81.1) — London kill zone")
     assert "Entry: 2028.90 (FVG mid, limit) | SL: 2026.09 | TP1: 2036.00 | TP2: 2048.00" in alert
     assert "Risk 0.5% (0.17 lots)" in alert

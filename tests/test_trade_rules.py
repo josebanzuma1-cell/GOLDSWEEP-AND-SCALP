@@ -92,6 +92,35 @@ def test_third_target() -> None:
     assert third_target(Direction.LONG, 2029.0, 2027.0, (2033.0, 2034.0), 0.0) is None
 
 
+def test_fixed_r_targets_replace_the_pools() -> None:
+    original = plan()  # long 2029.00, stop 2027.00: one R is 2.00
+    assert original.with_exit_targets(RiskConfig()) is original  # pools: unchanged
+    one = original.with_exit_targets(RiskConfig(target_mode="fixed_r", fixed_targets_r=(3.0,)))
+    assert one.targets == (2035.0, None, None) and one.risk_reward_1 == 3.0
+    assert split(one, 0.10) == [(0.10, "tp1")]  # one target: everything closes there
+    three = original.with_exit_targets(
+        RiskConfig(target_mode="fixed_r", fixed_targets_r=(2.0, 3.0, 5.0))
+    )
+    assert three.targets == (2033.0, 2035.0, 2039.0)
+    assert split(three, 0.10) == [(0.05, "tp1"), (0.03, "tp2"), (0.02, "tp3")]
+    short = plan(
+        direction=Direction.SHORT,
+        entry=2029.0,
+        stop_loss=2031.0,
+        take_profit_1=2025.0,
+        take_profit_2=2024.0,
+        take_profit_3=2023.0,
+    )
+    fixed = short.with_exit_targets(RiskConfig(target_mode="fixed_r", fixed_targets_r=(2.5,)))
+    assert fixed.targets == (2024.0, None, None)
+
+
+@pytest.mark.parametrize("values", [(), (3.0, 2.0), (1.0, 2.0, 3.0, 4.0), (0.0,), (2.0, 2.0)])
+def test_fixed_targets_must_be_one_to_three_rising_values(values: tuple[float, ...]) -> None:
+    with pytest.raises(ValueError, match="fixed_targets_r"):
+        RiskConfig(target_mode="fixed_r", fixed_targets_r=values)
+
+
 def test_tp3_is_checked_and_saved() -> None:
     with pytest.raises(InvalidPlan, match="TP3"):
         plan(take_profit_3=2028.0)
@@ -107,6 +136,12 @@ def test_breakeven_and_trailing_rules() -> None:
     assert breakeven_due(long=True, best_price=2031.0, **common)  # type: ignore[arg-type]
     assert not breakeven_due(long=True, best_price=2030.9, **common)  # type: ignore[arg-type]
     assert breakeven_due(long=True, best_price=2029.5, **{**common, "tp1_done": True})  # type: ignore[arg-type]
+    # D84: at_r 0 never moves the stop by distance, but reaching TP1 still does.
+    never = {**common, "at_r": 0.0}
+    assert not breakeven_due(long=True, best_price=2040.0, **never)  # type: ignore[arg-type]
+    assert breakeven_due(long=True, best_price=2029.5, **{**never, "tp1_done": True})  # type: ignore[arg-type]
+    assert breakeven_due(long=True, best_price=2035.0, **{**common, "at_r": 3.0})  # type: ignore[arg-type]
+    assert not breakeven_due(long=True, best_price=2034.9, **{**common, "at_r": 3.0})  # type: ignore[arg-type]
     nan = float("nan")
     assert (
         trailed_stop(

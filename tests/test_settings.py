@@ -34,6 +34,10 @@ OWNER_CHANGES: dict[str, tuple[float, float]] = {
     "auto_trade_threshold": (75, 60),  # D81: demo account, to collect evidence
     "entry_expiry_bars": (6, 24),  # D82: entries wait 2 hours (Phase 9 backtest)
 }
+#: The same for the risk section.
+OWNER_RISK_CHANGES: dict[str, tuple[float, float]] = {
+    "breakeven_at_r": (1.0, 0.0),  # D84: breakeven only when TP1 is reached
+}
 
 
 def write_config(tmp_path: Path, mutate: Callable[[dict[str, Any]], None] | None = None) -> Path:
@@ -127,14 +131,14 @@ def test_shipped_config_matches_the_spec(settings: Settings) -> None:
     assert news.post_news_sweep_mode and news.llm_enabled
     assert news.headline_half_life_min == 120
     assert [source.name for source in news.calendar_sources] == ["financecalendar", "forexfactory"]
-    assert cfg.risk.model_dump() == {
+    shipped_risk = {key: shipped for key, (_, shipped) in OWNER_RISK_CHANGES.items()}
+    assert cfg.risk.model_dump() == shipped_risk | {
         "risk_per_trade_pct": 0.5,
         "max_open_positions": 1,
         "max_trades_per_day": 3,
         "daily_loss_limit_pct": 2.0,
         "weekly_loss_limit_pct": 5.0,
         "max_consecutive_losses": 3,
-        "breakeven_at_r": 1.0,
         "partial_close_at_tp1_pct": 50,
         # Spec section 6 values that the section 11 starter file left out.
         "max_trades_per_session": 2,
@@ -143,6 +147,9 @@ def test_shipped_config_matches_the_spec(settings: Settings) -> None:
         # Spec 7b: the three-way split, 50 / 30 / 20, TP3 at 3R.
         "partial_close_at_tp2_pct": 30,
         "tp3_r": 3.0,
+        # D84: targets at fixed R multiples instead of the pools, off unless chosen.
+        "target_mode": "pools",
+        "fixed_targets_r": (3.0,),
     }
     assert cfg.broker.server_timezone == "auto"
     wf = cfg.backtest.walk_forward
@@ -154,10 +161,12 @@ def test_built_in_defaults_equal_the_shipped_config(settings: Settings, tmp_path
     owner's mode switch, which an empty file leaves at PAPER, and the owner's
     recorded changes, which an empty file leaves at the spec's values)."""
     spec_values = {key: spec for key, (spec, _) in OWNER_CHANGES.items()}
+    spec_risk = {key: spec for key, (spec, _) in OWNER_RISK_CHANGES.items()}
     shipped = settings.config.model_copy(
         update={
             "mode": Mode.PAPER,
             "strategy": settings.config.strategy.model_copy(update=spec_values),
+            "risk": settings.config.risk.model_copy(update=spec_risk),
         }
     )
     assert load(write_text(tmp_path, "")).config == shipped
