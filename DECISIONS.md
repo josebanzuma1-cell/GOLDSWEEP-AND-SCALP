@@ -1675,3 +1675,44 @@ The owner approved the plan of D102-D107 and its cost change (2026-11-22).
   Acceptance backtest, 2024-01-01..2026-10-31: the same 55 trades, 36.4% won, profit
   factor 2.43 (was 2.40), +0.94 R a trade (was +0.93), +27.1% (was +26.7%), max
   drawdown 2.9%; walk-forward 45 out-of-sample trades at +0.90 R (was +0.89).
+
+### D109. S3: the intraday mode fails its evidence test
+
+**Built** (`goldsweep/scalping/intraday.py`, `intraday_backtest.py`, config
+`scalper.intraday`): three rules fed one closed M5 bar at a time, every position flat
+by the New York rollover through a new shared rule (`TradePlan.close_by`,
+`close_by_due`, exit reason `session_end`; plans without it, the main strategy's, are
+unchanged):
+
+- **Asian breakout:** in the London window, the first close beyond the Asian range
+  (by 0.1 ATR) trades that way; stop beyond the range's middle; one a day; the range
+  must cover at least half its window.
+- **New York opening range:** the high and low of 09:30-09:45 New York; the first close
+  beyond it until 12:00 New York; stop beyond its middle; one a day.
+- **VWAP trend:** a tick-volume VWAP from the London open; in the London and New York
+  windows a close across it (by 0.1 ATR) with the VWAP moving that way over 6 bars;
+  stop beyond the last 6 bars' extreme, then the VWAP trails it; one per window and
+  direction a day.
+- Stops must sit 0.5-4 ATR(M5) away; ladders 1/2/3 R and 0.5/1/1.5 R; children 40/30/30;
+  breakeven+ at TP1, the stop to TP1 after TP2; the scalper's risk limits; trades
+  managed on M1 bars. The gate (D103): the ladder chosen on the first two-thirds must
+  be positive on the held-out third, positive overall after costs, with 100+ trades.
+
+**Results** (2024-01-01..2026-10-31, `reports/intraday_2024-01-01_2026-10-31/`):
+
+| Rule (chosen ladder) | Trades | Won | R per trade | First 2/3 | Held-out 1/3 | Without costs |
+|---|---|---|---|---|---|---|
+| Asian breakout (0.5/1/1.5 R) | 121 | 60.3% | -0.10 | -0.07 (87) | -0.18 (34) | -0.08 |
+| Opening range (0.5/1/1.5 R) | 686 | 64.7% | -0.06 | -0.07 (464) | -0.04 (222) | +0.00 |
+| VWAP trend (0.5/1/1.5 R) | 770 | 45.3% | -0.06 | -0.07 (506) | -0.05 (264) | +0.01 |
+
+Every variant loses after costs (-0.06 to -0.14 R a trade) and is flat before them.
+The Asian breakout loses even before costs, and 332 of its 459 setups needed a stop
+beyond 4 ATR because the range's middle is far away: London's break of the Asian
+range tends to reverse, the very raid the main sweep + MSS strategy trades. The VWAP
+trend's trailing exits average -0.28 R. These are fixed, textbook rules; tuning them on
+the same history would only fit its noise, so nothing was tuned.
+
+**Decision:** the intraday mode does not run; `scalping/modes.py` says so on `/scalper
+intraday` and refuses `/approve scalper intraday`. Next: S4, the swing mode, on daily
+bars from 2014.

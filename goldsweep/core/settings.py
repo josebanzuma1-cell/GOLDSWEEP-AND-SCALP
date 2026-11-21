@@ -835,6 +835,52 @@ class TicksConfig(_StrictModel):
     keep_days: int = Field(default=0, ge=0, le=3650)
 
 
+IntradayRule = Literal["asian_breakout", "opening_range", "vwap_trend"]
+
+
+class IntradayConfig(_StrictModel):
+    """The scalper's intraday mode (S3, D109): entries flat by the New York rollover."""
+
+    rules: tuple[IntradayRule, ...] = ("asian_breakout", "opening_range", "vwap_trend")
+    #: A breakout close must clear the range by this much.
+    breakout_buffer_atr: float = Field(default=0.1, ge=0, le=5)
+    sl_buffer_atr: float = Field(default=0.1, ge=0, le=5)
+    sl_min_atr: float = Field(default=0.5, ge=0, le=20)
+    sl_max_atr: float = Field(default=4.0, gt=0, le=50)
+    #: TP ladders tried, in R from the entry; each rule's is chosen on the first
+    #: two-thirds of a backtest and judged on the last third.
+    ladders: tuple[tuple[float, ...], ...] = ((1.0, 2.0, 3.0), (0.5, 1.0, 1.5))
+    #: The New York opening range: from this time (America/New_York) for this long;
+    #: breakouts count until ``breakout_until``.
+    ny_open: dt.time = dt.time(9, 30)
+    opening_range_minutes: int = Field(default=15, ge=5, le=120)
+    breakout_until: dt.time = dt.time(12, 0)
+    #: VWAP trend: the cross must hold against the VWAP of this many bars earlier.
+    vwap_slope_bars: int = Field(default=6, ge=1, le=100)
+    #: Bars whose lows (highs) the VWAP-trend stop goes beyond.
+    swing_bars: int = Field(default=6, ge=2, le=100)
+    #: The evidence gate (D103): trades needed, and a positive held-out last third.
+    min_trades: int = Field(default=100, ge=1, le=100_000)
+
+    @field_validator("ladders")
+    @classmethod
+    def _ladders_rise(cls, value: tuple[tuple[float, ...], ...]) -> tuple[tuple[float, ...], ...]:
+        for ladder in value:
+            if not 1 <= len(ladder) <= 3 or any(step <= 0 for step in ladder):
+                raise ValueError("each intraday ladder needs one to three positive R steps")
+            if list(ladder) != sorted(set(ladder)):
+                raise ValueError("an intraday ladder must rise: TP1 < TP2 < TP3")
+        if not value:
+            raise ValueError("scalper.intraday.ladders needs at least one ladder")
+        return value
+
+    @model_validator(mode="after")
+    def _stops_in_order(self) -> Self:
+        if self.sl_min_atr >= self.sl_max_atr:
+            raise ValueError("scalper.intraday.sl_min_atr must be below sl_max_atr")
+        return self
+
+
 class ScalperConfig(_StrictModel):
     """The scalper add-on's settings (docs/SCALPER_SPEC.md, D88-D107).
 
@@ -868,6 +914,7 @@ class ScalperConfig(_StrictModel):
     #: Breakeven+ after TP1, the stop to TP1 after TP2, and the step-trail line.
     adaptive_trail: bool = True
     risk: ScalperRiskConfig = ScalperRiskConfig()
+    intraday: IntradayConfig = IntradayConfig()
 
     @field_validator("split")
     @classmethod

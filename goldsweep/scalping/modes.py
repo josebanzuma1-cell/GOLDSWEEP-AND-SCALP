@@ -21,11 +21,18 @@ class ModeInfo:
     phase: str  # the phase that builds and tests it
     built: bool = False
     passed: bool = False  # its evidence test passed (D103)
+    #: Why a mode does not run, once its phase has judged it (e.g. a failed backtest).
+    note: str = ""
 
 
 REGISTRY: dict[str, ModeInfo] = {
     "tick": ModeInfo("tick", "tick (seconds to two minutes)", "S5"),
-    "intraday": ModeInfo("intraday", "intraday (flat by the New York close)", "S3"),
+    "intraday": ModeInfo(
+        "intraday",
+        "intraday (flat by the New York close)",
+        "S3",
+        note="its three rules failed their evidence test in S3 (D109)",
+    ),
     "swing": ModeInfo("swing", "swing (days to weeks)", "S4"),
 }
 MODE_NAMES = tuple(REGISTRY)
@@ -46,5 +53,7 @@ def describe(name: str, *, selected: str, approved: bool) -> str:
     info = REGISTRY[name]
     state = mode_state(name, selected=selected, approved=approved)
     if state == NOT_BUILT:
+        if info.note:
+            return f"{info.label}: selected, but {info.note}: nothing runs"
         return f"{info.label}: selected, not built yet (phase {info.phase}): nothing runs"
     return f"{info.label}: {state}"

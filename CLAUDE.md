@@ -24,6 +24,9 @@ latency arbitrage, news spikes, grids, martingale, hedging and stacking are neve
   `load_ticks`. Brokers serve ticks through `BrokerClient.get_ticks` (true UTC).
 - **Costs:** this account charges no commission (D108); the built-in default stays
   7.00 a lot for other accounts. Order round trips are timed (`order_log.elapsed_ms`).
+- **Flat-by** (S3, D109): `TradePlan.close_by` closes a position at the first bar close
+  at or after it (`close_by_due`, exit `session_end`); the live executor must apply the
+  same rule when a mode that uses it goes live. The intraday mode failed (D109).
 
 ## How the work is organised
 
@@ -162,6 +165,7 @@ python -m goldsweep.backtest --from 2024-01-01 --to 2026-10-31   backtest report
 python -m goldsweep.backtest --from 2026-01-05 --to 2026-01-30 --mock   offline
 python -m goldsweep.backtest --from 2024-01-01 --to 2026-10-31 --candidates   A+ playbooks as if approved
 python -m goldsweep.scalping.backtest --from 2024-01-01 --to 2026-10-31      scalper add-on (S1, D101)
+python -m goldsweep.scalping.intraday_backtest --from 2024-01-01 --to 2026-10-31   intraday mode (S3, D109)
 python main.py --news [--no-llm] [--mock]   calendar, headlines, news bias, scenarios
 python main.py --paper [--mock] [--no-llm]  paper trading loop (Ctrl+C stops it)
 python main.py --live [--no-llm]            live trading (MODE=LIVE + mode: LIVE + typed confirmation)

@@ -127,6 +127,23 @@ def test_mode_states() -> None:
     assert modes.describe("swing", selected="intraday", approved=False) == (
         "swing (days to weeks): off"
     )
+    # S3 (D109): the intraday mode was tested and failed, so it does not run.
+    assert modes.describe("intraday", selected="intraday", approved=False) == (
+        "intraday (flat by the New York close): selected, but its three rules failed their "
+        "evidence test in S3 (D109): nothing runs"
+    )
+
+
+def test_a_failed_mode_says_so(settings: Settings, db: Database) -> None:
+    h = Harness(settings, db)
+    say(h, "scalper", "intraday")
+    assert say(h, "mode", "both").endswith(
+        "Its intraday mode does not run: its three rules failed their evidence test in S3 (D109)."
+    )
+    assert say(h, "approve", "scalper intraday") == (
+        "Not approved: the intraday mode does not run (its three rules failed their evidence "
+        "test in S3 (D109))."
+    )
 
 
 def test_the_dashboard_switches_too(settings: Settings, db: Database) -> None:

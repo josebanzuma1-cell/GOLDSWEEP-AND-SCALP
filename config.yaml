@@ -346,5 +346,21 @@ scalper:
     time_stop_min_r: 0.3
     max_spread_multiple: 1.5
     cost_multiple: 2.0           # TP1 at least 2x the round-trip cost away
+  # The intraday mode (S3, D109): M5 entries, flat by the New York rollover. All three
+  # rules failed their evidence test on 2024-2026, so the mode does not run.
+  # python -m goldsweep.scalping.intraday_backtest --from 2024-01-01 --to 2026-10-31
+  intraday:
+    rules: [asian_breakout, opening_range, vwap_trend]
+    breakout_buffer_atr: 0.1     # a breakout close clears the range by this much
+    sl_buffer_atr: 0.1
+    sl_min_atr: 0.5
+    sl_max_atr: 4.0
+    ladders: [[1.0, 2.0, 3.0], [0.5, 1.0, 1.5]]   # R steps tried; chosen on the first 2/3
+    ny_open: "09:30"             # America/New_York: the opening range starts here
+    opening_range_minutes: 15
+    breakout_until: "12:00"      # America/New_York: last opening-range breakout
+    vwap_slope_bars: 6
+    swing_bars: 6                # VWAP-trend stop beyond these bars' extreme
+    min_trades: 100              # the evidence gate (D103)
 
 display_timezone: Africa/Kampala

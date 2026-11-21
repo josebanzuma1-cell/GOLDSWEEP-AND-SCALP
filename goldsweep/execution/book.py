@@ -134,6 +134,9 @@ class TradePlan:
     #: Why ``expires_at`` was brought forward (e.g. "the rollover block"); empty
     #: when the order simply lives for its configured number of bars.
     expiry_note: str = ""
+    #: An open position is closed at the first bar close at or after this time (the
+    #: scalper's intraday mode: flat before the New York rollover). None: no limit.
+    close_by: dt.datetime | None = None
 
     def __post_init__(self) -> None:
         numbers = [self.entry, self.stop_loss, self.take_profit_1]
@@ -252,6 +255,7 @@ class TradePlan:
             "risk_reward_1": self.risk_reward_1,
             "take_profit_3": self.take_profit_3,
             "expiry_note": self.expiry_note,
+            "close_by": self.close_by.isoformat() if self.close_by else None,
         }
 
     @classmethod
@@ -259,6 +263,8 @@ class TradePlan:
         values = dict(data)
         values["time"] = dt.datetime.fromisoformat(values["time"])
         values["expires_at"] = dt.datetime.fromisoformat(values["expires_at"])
+        close_by = values.get("close_by")
+        values["close_by"] = dt.datetime.fromisoformat(close_by) if close_by else None
         values["direction"] = Direction(values["direction"])
         return cls(**values)
 
@@ -530,6 +536,11 @@ def step_trailed_stop(
     return level if close + spread < level < stop else None
 
 
+def close_by_due(plan: TradePlan, bar_close: dt.datetime) -> bool:
+    """True once a plan's ``close_by`` time has come (never for a plan without one)."""
+    return plan.close_by is not None and ensure_utc(bar_close) >= ensure_utc(plan.close_by)
+
+
 def time_stop_due(
     *,
     long: bool,
@@ -569,6 +580,7 @@ class ExitReason(StrEnum):
     BREAKEVEN = "breakeven"
     TRAIL = "trail"
     TIME = "time"  # the scalper's time stop (not at +time_stop_min_r R in time)
+    SESSION_END = "session_end"  # the plan's close_by time came (intraday: flat by the rollover)
     END_OF_DATA = "end_of_data"
     MANUAL = "manual"  # closed by the kill switch (/stop)
 
@@ -970,6 +982,16 @@ class TradeBook:
                         position.tp2_done = True
             if not position.legs:
                 self._finish(position, events)
+                continue
+            if close_by_due(position.plan, bar.close_time):
+                exit_price = (
+                    bar.close - self._slippage
+                    if position.long
+                    else bar.close + bar.spread + self._slippage
+                )
+                self._close_all(
+                    position, float(exit_price), bar.close_time, ExitReason.SESSION_END, events
+                )
                 continue
             if self._time_stop(position, bar, events):
                 continue

@@ -392,6 +392,8 @@ class Trader:
             return " The scalper's mode is off: send /scalper tick, intraday or swing."
         info = scalper_modes.REGISTRY[mode]
         if not info.built:
+            if info.note:
+                return f" Its {mode} mode does not run: {info.note}."
             return f" Its {mode} mode is not built yet (phase {info.phase}): nothing runs."
         if not (info.passed and self._scalper_approved(mode)):
             return f" Its {mode} mode runs on paper only until it passes and is approved."
@@ -428,6 +430,8 @@ class Trader:
             return "Send /approve scalper tick, intraday or swing."
         info = scalper_modes.REGISTRY[mode]
         if not info.built:
+            if info.note:
+                return f"Not approved: the {mode} mode does not run ({info.note})."
             return f"The {mode} mode is not built yet (phase {info.phase}): nothing to approve."
         if not info.passed:
             return (
