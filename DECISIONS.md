@@ -1331,10 +1331,12 @@ Asian setups to monitoring, so nothing new can trade before then.
   candidate's *fingerprint* (a hash of the rule). The book's state is saved after
   every change, so a restart carries on; paper and live share it (it never trades).
   The shadow book trades the plain plan, without M1 refinement (D83 is off).
-- **Confirmation.** After each finished monitored trade the owner gets its result
-  and the tally (finished, won, average R). When `playbooks.monitor_trades` (20)
-  have finished with a positive average, one message asks for
-  `/approve <session>` (asked once per candidate fingerprint).
+- **Confirmation.** Finished monitored trades send no Telegram message (the owner
+  chose fewer messages on reviewing this stage): each is logged, and `/status`
+  shows every session's tally (finished, won, average R). When
+  `playbooks.monitor_trades` (20) have finished with a positive average, one
+  message asks for `/approve <session>` (once per candidate fingerprint). The alert
+  for the setup itself still says that it is monitored.
 - **Commands.** `/approve <session>` (asia/tokyo, london, newyork/ny) works only
   for a confirmed candidate; it stores `{session: fingerprint}` and from then on
   that candidate *replaces* the trading rule: only A+ setups trade in that session,

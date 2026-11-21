@@ -173,16 +173,6 @@ def tally_text(tally: Any) -> str:
     return f"{tally.finished} finished, {tally.won} won, {tally.average_r:+.2f} R average"
 
 
-def monitor_result(trade: Any, playbook_name: str, tally: Any, needed: int) -> str:
-    """A monitored (paper-only) trade of a session's A+ candidate has finished (D87)."""
-    icon = "🏁" if trade.r_multiple >= 0 else "🔴"
-    return (
-        f"👀{icon} Monitored {trade.direction.value} {trade.plan.id} ({playbook_name} A+ "
-        f"playbook) closed ({trade.exit_reason.value}): {trade.r_multiple:+.2f} R, paper only. "
-        f"Monitoring: {tally_text(tally)}; {needed} needed."
-    )
-
-
 def approval_request(playbook: str, playbook_name: str, rule: str, tally: Any) -> str:
     """The candidate has its monitored trades with a positive average: ask the owner."""
     return (

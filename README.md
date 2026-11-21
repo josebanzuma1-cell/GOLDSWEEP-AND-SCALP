@@ -85,7 +85,7 @@ with the Judas tag) and Asia none. A candidate is monitored before it may trade.
 **Monitoring and approval (D87).** Every alert carries its grade (A+, A or B). A
 setup that meets its session's candidate is also traded on a *shadow book*: on
 paper only, by the same rules as every other trade, never sent to MetaTrader 5.
-Each finished monitored trade is reported with the running tally. After 20 have
+Monitored trades are counted quietly (`/status` shows the tally). After 20 have
 finished with a positive average, Telegram asks the owner to send
 `/approve <session>`; from then on only that session's A+ setups trade there.
 `/revoke <session>` undoes it, and editing a candidate in `config.yaml` starts its

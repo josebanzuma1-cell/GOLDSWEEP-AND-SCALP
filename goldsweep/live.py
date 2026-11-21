@@ -799,20 +799,31 @@ class Trader:
         return f"monitored for the {name} A+ playbook ({tally.finished} of {needed} finished)"
 
     def _monitor_bar(self, bar: Bar, trail: TrailLevels) -> None:
-        """The bar moves the monitored setups; finished ones are reported and counted."""
+        """The bar moves the monitored setups; finished ones are counted.
+
+        A finished monitored trade sends no message (the owner's choice, D87): the
+        tally is in /status, and Telegram speaks only to ask for the approval.
+        """
         try:
             closed = self._shadow.on_bar(bar, trail)
         except Exception as exc:  # noqa: BLE001 - monitoring must never stop trading
             log.error("shadow book failed", error=repr(exc))
             return
-        needed = self._config.playbooks.monitor_trades
         for event in closed:
             playbook = playbook_session(event.plan.session)
             candidate = self._candidate(playbook) if playbook is not None else None
             if playbook is None or candidate is None or event.trade is None:
                 continue
             tally = self._shadow.tally(playbook, candidate)
-            self._send(messages.monitor_result(event.trade, playbook_name(playbook), tally, needed))
+            log.info(
+                "monitored trade finished",
+                id=event.plan.id,
+                playbook=playbook,
+                exit=event.trade.exit_reason.value,
+                r=round(event.trade.r_multiple, 2),
+                finished=tally.finished,
+                average_r=tally.average_r,
+            )
             self._ask_approval(playbook, candidate, tally)
 
     def _ask_approval(self, playbook: str, candidate: PlaybookRule, tally: Tally) -> None:

@@ -1,10 +1,10 @@
 """Phase 10 stage 2 (D87): session playbooks in the trading loop.
 
 A setup that meets its session's A+ candidate is traded on the shadow book (paper
-only, never sent), its result is counted, and after enough finished trades with a
-positive average the owner is asked to ``/approve <session>``. These tests replay
-the hand-made London raid of tests/test_paper.py: a long at 2028.90 that reaches
-TP2, graded A+ by a candidate asking for a Judas swing.
+only, never sent), its result is counted without a message, and after enough
+finished trades with a positive average the owner is asked to ``/approve <session>``.
+These tests replay the hand-made London raid of tests/test_paper.py: a long at
+2028.90 that reaches TP2, graded A+ by a candidate asking for a Judas swing.
 """
 
 from __future__ import annotations
@@ -113,15 +113,12 @@ def test_message_texts() -> None:
 def test_a_candidate_setup_is_monitored_and_never_sent(settings: Settings, db: Database) -> None:
     h = Harness(with_london(settings, MONITORED), db)
     h.run_until(END)
-    alert, monitored = h.notes.sent
+    # One message: the alert. The monitored trade's result is counted, not messaged.
+    (alert,) = h.notes.sent
     assert alert.startswith("🟡 XAUUSD LONG setup (score 81.1) — London kill zone")
     assert "Grade: A+ (London playbook)" in alert
     assert "Action: alert only: the London playbook does not trade yet" in alert
     assert "👀 monitored for the London A+ playbook (0 of 20 finished)" in alert
-    assert monitored.startswith(
-        "👀🏁 Monitored LONG 2026-11-17-LDN-01 (London A+ playbook) closed (tp2): +4.77 R, "
-        "paper only."
-    )
     # Nothing traded for real: no order, no trade, the balance untouched.
     assert db.query("SELECT COUNT(*) FROM paper_trades") == [(0,)]
     assert h.trader.executor.equity == pytest.approx(10_000.0)
@@ -170,9 +167,8 @@ def test_the_twentieth_finished_trade_asks_for_approval(settings: Settings, db: 
     assert early.startswith("Not approved: the London A+ playbook needs 20 finished monitored")
     assert "So far: 19 finished, 19 won, +0.50 R average." in early
     h.run_until(END)
-    alert, monitored, ask = h.notes.sent
+    alert, ask = h.notes.sent  # the setup's alert, then the request: nothing in between
     assert "👀 monitored for the London A+ playbook (19 of 20 finished)" in alert
-    assert "Monitoring: 20 finished, 20 won" in monitored
     assert ask.startswith("✅ London A+ playbook confirmed in monitoring: 20 finished, 20 won")
     assert "Rule: sweep_mss, score >= 60, with judas." in ask
     assert "Send /approve london" in ask
@@ -224,7 +220,7 @@ def test_editing_the_candidate_restarts_its_monitoring(settings: Settings, db: D
     status = h.trader.status()
     assert "• London: trades alerts only | A+ candidate monitored: 0 finished (needs 20)" in status
     h.run_until(END)
-    alert, _monitored = h.notes.sent
+    (alert,) = h.notes.sent
     assert "Action: alert only: the London playbook does not trade yet" in alert
     assert "👀 monitored for the London A+ playbook (0 of 20 finished)" in alert
 
