@@ -12,6 +12,9 @@ it shows (name, mascot, logo, artwork); the `reference/` folder stays out of git
 Its logic is `goldsweep/scalping/` (one closed bar at a time, like the main engine);
 its position rules are the trade book's `Management` (shared, so S2's live executor
 must use the same functions). S1 found it loses after costs (D101): it stays off.
+The next plan (`docs/SCALPER_MODES.md`, D102-D107) gives it tick, intraday and swing
+modes behind a switch; no mode trades before its evidence gate and `/approve`, and
+latency arbitrage, news spikes, grids, martingale, hedging and stacking are never built.
 
 ## How the work is organised
 

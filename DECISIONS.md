@@ -1580,3 +1580,66 @@ calendar. Results on the past do not predict the future in either direction.
 **Decision:** the scalper stays off (`scalper.enabled: false`) and is not wired into
 the live bot. S2-S6 wait for the owner's decision on this result. The code, tests and
 report stay, so any change to the rules can be measured the same way.
+
+### D102. Research on fast, intraday and swing scalper modes (2026-11-22)
+
+The owner asked for research on scalper robots that open many trades and close them
+within seconds once price moves their way ("HFT mode"), on intraday and swing modes
+and on other modes. The findings, sources and measurements are in
+`docs/SCALPER_MODES.md`. In short: retail "HFT" gold robots are tick scalpers whose
+results depend on spread and latency and are published only by their sellers; latency
+arbitrage is forbidden by the broker; seconds-scale edges on exchanges come from order
+books, which XAUUSDm does not offer; gold absorbs news in about 90 seconds, which the
+news blackout and widening spreads rule out here; the opening-range breakout is about
+zero after costs in an independent replication; trend following over weeks to months
+is the best-documented pattern. Measured here: 69 ms ping, a 0.24 spread that is 36%
+of a typical 10-second move, no commission on this account, two weeks of tick history,
+daily bars from 2014, swap of -43 USD a lot a night on longs.
+
+### D103. One scalper, three modes, a switch, evidence before trading
+
+The scalper gets three modes, each with its own entries and tools (the keep/drop table
+in `docs/SCALPER_MODES.md`): **tick** (the "HFT" request, honestly named: seconds to
+two minutes, one trade at a time, many a session), **intraday** (flat by the New York
+close) and **swing** (days to weeks, swap paid). `/mode main|scalper|both` chooses which
+strategies may trade; `/scalper off|tick|intraday|swing` chooses the scalper's mode;
+each mode is off, paper (shadow book) or trading. A mode may trade only after its
+evidence gate (positive after realistic costs on data it was not tuned on, enough
+trades, positive held-out third, 20 positive paper trades) and the owner's
+`/approve scalper <mode>`. The kill switch stops every strategy.
+
+### D104. Never built, whatever the switch says
+
+Latency arbitrage (broker terms); news-spike trading (blackout rule, spreads,
+slippage); grid, martingale, averaging down, hedging to recover (ground rules);
+stacking positions beyond one scalp's three children in one risk budget; order-flow
+strategies (no order book). "Many trades" means many in a row, one at a time.
+
+### D105. The tick mode runs in its own process
+
+A tick loop deciding several times a second cannot wait behind the bar job, which
+holds the bot's lock for seconds while it reads the broker and runs the engines. So the
+tick mode runs as its own process (`python main.py --scalper`) with its own MT5
+connection, magic number and state; the account guard reads every GoldSweep position
+from the broker; the main bot's kill switch closes the scalper's positions too and
+writes a stop the scalper obeys within a second; unattended starts stay unarmed. This
+amends D88 for the tick mode only. It also needs a Windows VPS with a ping under 20 ms
+to the broker (the MQL5 VPS cannot run Python); without one the tick mode stays on
+paper.
+
+### D106. Ticks are recorded from S2 on
+
+The broker serves about two weeks of tick history, too little to judge a tick mode.
+From S2 the bot saves every XAUUSDm tick (time, bid, ask) in daily compressed files
+under `data/ticks/`. The tick mode is judged when at least 8 weeks are recorded.
+
+### D107. Costs as this account charges them (owner to confirm)
+
+The backtests charge 7.00 a lot in commission (the spec's ECN-style default), but our
+122 demo deals on XAUUSDm (an Exness standard account) paid none; its cost is the
+0.24 spread. Proposed: the cost model per account, commission 0 for this one,
+measured from the broker's deals. This changes the acceptance backtest's figures (it
+makes every result a little better), so it waits for the owner's approval. With no
+commission the S1 scalper still loses in all eight M1 variants: -0.10 to -0.18 R a
+trade (it was -0.13 to -0.22 R), the configured one -0.14 R over 4,631 trades; before
+costs they stay at -0.04 to +0.06 R. D101's verdict stands.
