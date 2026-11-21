@@ -771,6 +771,89 @@ class ConfluenceConfig(_StrictModel):
     smt: SmtConfig = SmtConfig()
 
 
+ScalpStrategy = Literal["sweep_reclaim", "trail_rejection"]
+ScalpSession = Literal["asia", "london", "newyork", "overlap"]
+
+
+class StepTrailConfig(_StrictModel):
+    """The scalper's step-trail line: hl2 +/- multiplier x ATR, moving only with the trend."""
+
+    atr_period: int = Field(default=10, ge=2, le=200)
+    multiplier: float = Field(default=2.0, gt=0, le=10)
+
+
+class ScalperRiskConfig(_StrictModel):
+    """The scalper's own limits (D91); the account-wide ones come in S2."""
+
+    #: All three children together lose this share of equity at the stop.
+    risk_per_scalp_pct: float = Field(default=0.25, gt=0, le=1.0)
+    max_scalps_per_day: int = Field(default=8, ge=1, le=50)
+    daily_loss_limit_pct: float = Field(default=1.0, gt=0, le=10)
+    #: Losses in a row that pause the scalper (24 hours, as the main strategy).
+    max_consecutive_losses: int = Field(default=3, ge=1, le=20)
+    #: No new scalp in the same direction this long after a stop-out.
+    cooldown_sec: int = Field(default=300, ge=0, le=86_400)
+    #: A scalp not yet at TP1 and below ``time_stop_min_r`` after this long is closed
+    #: (0 turns the time stop off).
+    time_stop_sec: int = Field(default=900, ge=0, le=86_400)
+    time_stop_min_r: float = Field(default=0.3, ge=0, le=5)
+    max_spread_multiple: float = Field(default=1.5, ge=1, le=10)
+    #: TP1 must be at least this many times the round-trip cost away.
+    cost_multiple: float = Field(default=2.0, ge=0, le=20)
+
+
+class ScalperConfig(_StrictModel):
+    """The M1 scalper add-on (docs/SCALPER_SPEC.md, D88-D99). Off until approved."""
+
+    enabled: bool = False
+    timeframe: Literal["M1", "M5"] = "M1"
+    strategy: ScalpStrategy = "sweep_reclaim"
+    #: Session windows (as in ``sessions:``) in which scalps may open.
+    sessions: tuple[ScalpSession, ...] = ("asia", "london", "newyork", "overlap")
+    #: Scalp only with the H1 bias (or when it is neutral).
+    htf_filter: bool = True
+    atr_period: int = Field(default=14, ge=2, le=200)
+    step_trail: StepTrailConfig = StepTrailConfig()
+    #: Bars on each side that confirm a micro swing point.
+    swing_bars: int = Field(default=2, ge=1, le=10)
+    #: Micro swing points formed within this many bars are liquidity.
+    micro_lookback: int = Field(default=15, ge=3, le=500)
+    sweep_min_atr: float = Field(default=0.05, ge=0, le=5)
+    #: The reclaim must come within this many bars of the sweep.
+    sweep_window: int = Field(default=6, ge=1, le=100)
+    twin_bars_tolerance_atr: float = Field(default=0.05, ge=0, le=1)
+    sl_buffer_atr: float = Field(default=0.10, ge=0, le=5)
+    sl_min_atr: float = Field(default=0.5, ge=0, le=20)
+    sl_max_atr: float = Field(default=3.0, gt=0, le=50)
+    #: TP steps in R: 0.5 gives TP1/TP2/TP3 at 0.5/1.0/1.5 R ("tight"), 2.0 "wide".
+    tp_step_r: float = Field(default=0.5, gt=0, le=10)
+    tp_step_r_max: float = Field(default=2.0, gt=0, le=10)
+    #: Shares of the scalp's lots for the three children (TP1, TP2, TP3).
+    split: tuple[float, ...] = (0.4, 0.3, 0.3)
+    #: Breakeven+ after TP1, the stop to TP1 after TP2, and the step-trail line.
+    adaptive_trail: bool = True
+    risk: ScalperRiskConfig = ScalperRiskConfig()
+
+    @field_validator("split")
+    @classmethod
+    def _split_sums_to_one(cls, value: tuple[float, ...]) -> tuple[float, ...]:
+        if not 1 <= len(value) <= 3 or any(share <= 0 for share in value):
+            raise ValueError("scalper.split needs one to three positive shares")
+        if abs(sum(value) - 1.0) > 1e-6:
+            raise ValueError("scalper.split must add up to 1")
+        return value
+
+    @model_validator(mode="after")
+    def _ranges_in_order(self) -> Self:
+        if self.sl_min_atr >= self.sl_max_atr:
+            raise ValueError("scalper.sl_min_atr must be below scalper.sl_max_atr")
+        if self.tp_step_r > self.tp_step_r_max:
+            raise ValueError("scalper.tp_step_r must not exceed scalper.tp_step_r_max")
+        if len(set(self.sessions)) != len(self.sessions):
+            raise ValueError("scalper.sessions contains duplicates")
+        return self
+
+
 class AppConfig(_StrictModel):
     """Everything in config.yaml."""
 
@@ -790,6 +873,7 @@ class AppConfig(_StrictModel):
     models: ModelsConfig = ModelsConfig()
     confluence: ConfluenceConfig = ConfluenceConfig()
     playbooks: PlaybooksConfig = PlaybooksConfig()
+    scalper: ScalperConfig = ScalperConfig()
     display_timezone: ZoneName = "Africa/Kampala"
 
     @model_validator(mode="after")

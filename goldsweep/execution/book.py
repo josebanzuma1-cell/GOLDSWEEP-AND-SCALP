@@ -360,19 +360,31 @@ class LegPlan:
     reason: ExitReason
 
 
-def plan_legs(plan: TradePlan, lots: float, spec: SymbolSpec, risk: RiskConfig) -> list[LegPlan]:
+def plan_legs(
+    plan: TradePlan,
+    lots: float,
+    spec: SymbolSpec,
+    risk: RiskConfig,
+    split: Sequence[float] | None = None,
+) -> list[LegPlan]:
     """Split ``lots`` over the plan's targets (spec 7b: 50 / 30 / 20 by default).
 
-    A missing target gives its share to the nearest earlier one, so without a
-    TP3 the rest goes to TP2 and without a TP2 to TP1. Every part but the last is
-    rounded down to the volume step; the last takes the remainder. When a part
-    would fall below the broker's minimum volume, the farthest part is folded
-    into the one before it until every part can be traded.
+    ``split`` (fractions for TP1, TP2, TP3, e.g. the scalper's 0.4 / 0.3 / 0.3, D90)
+    replaces the risk settings' percentages when given. A missing target gives its
+    share to the nearest earlier one, so without a TP3 the rest goes to TP2 and
+    without a TP2 to TP1. Every part but the last is rounded down to the volume
+    step; the last takes the remainder. When a part would fall below the broker's
+    minimum volume, the farthest part is folded into the one before it until every
+    part can be traded.
     """
     reasons = (ExitReason.TP1, ExitReason.TP2, ExitReason.TP3)
-    first = risk.partial_close_at_tp1_pct
-    second = min(risk.partial_close_at_tp2_pct, 100.0 - first)
-    shares = [first, second, max(0.0, 100.0 - first - second)]
+    if split is not None:
+        shares = [100.0 * share for share in split][:3]
+        shares += [0.0] * (3 - len(shares))
+    else:
+        first = risk.partial_close_at_tp1_pct
+        second = min(risk.partial_close_at_tp2_pct, 100.0 - first)
+        shares = [first, second, max(0.0, 100.0 - first - second)]
     present = [t is not None for t in plan.targets]
     for k in (2, 1):
         if not present[k]:
@@ -448,6 +460,102 @@ def trailed_stop(
     return None
 
 
+# -- the scalper's adaptive trail (S1, D90): shared by every mode like the rules above --
+
+
+class StepLineSource(Protocol):
+    def line_at(self, close_ns: int) -> tuple[float, float]:
+        """(step-trail line, ATR) after the bar closing at ``close_ns``; NaN when not ready."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class Management:
+    """Extra position rules for one book (the scalper's). None of them apply without it.
+
+    * ``split``: shares of the lots for TP1..TP3 instead of the risk settings';
+    * ``breakeven_offset``: after TP1 the stop goes that far *past* the entry (the
+      costs: "breakeven+") instead of to the entry itself;
+    * ``stop_to_tp1_after_tp2``: after TP2 the stop goes to TP1;
+    * ``step_trail``: the stop follows the step-trail line +/- ``trail_buffer_atr`` x ATR;
+    * ``time_stop``: a position not yet at TP1 is looked at once, this long after its
+      fill, and closed unless it is at least ``time_stop_min_r`` R up.
+
+    Every stop move only ever tightens the stop.
+    """
+
+    split: tuple[float, ...] | None = None
+    breakeven_offset: float = 0.0
+    stop_to_tp1_after_tp2: bool = False
+    step_trail: bool = False
+    trail_buffer_atr: float = 0.0
+    time_stop: dt.timedelta | None = None
+    time_stop_min_r: float = 0.0
+
+
+def breakeven_plus_stop(
+    *, long: bool, stop: float, fill_price: float, offset: float, close: float, spread: float
+) -> float | None:
+    """The stop ``offset`` past the entry, when that tightens it and price is beyond it."""
+    level = fill_price + offset if long else fill_price - offset
+    if long:
+        return level if stop < level < close else None
+    return level if close + spread < level < stop else None
+
+
+def ladder_stop(
+    *, long: bool, stop: float, take_profit_1: float, close: float, spread: float
+) -> float | None:
+    """After TP2: the stop at TP1, when that tightens it and price is beyond it."""
+    if long:
+        return take_profit_1 if stop < take_profit_1 < close else None
+    return take_profit_1 if close + spread < take_profit_1 < stop else None
+
+
+def step_trailed_stop(
+    *, long: bool, stop: float, line: float, buffer: float, close: float, spread: float
+) -> float | None:
+    """The stop behind the step-trail line, when that tightens it (else ``None``).
+
+    A long's stop goes ``buffer`` under the line; a short's ``buffer`` plus the
+    spread over it (a short is stopped on the ask). It never moves back, and it
+    must stay on the losing side of the current price.
+    """
+    if math.isnan(line):
+        return None
+    if long:
+        level = line - buffer
+        return level if stop < level < close else None
+    level = line + buffer + spread
+    return level if close + spread < level < stop else None
+
+
+def time_stop_due(
+    *,
+    long: bool,
+    fill_price: float,
+    initial_stop: float,
+    close: float,
+    spread: float,
+    held: dt.timedelta,
+    after: dt.timedelta,
+    min_r: float,
+) -> bool:
+    """True when ``held`` has reached ``after`` and the position is below ``min_r`` R.
+
+    The result is measured at the price the position would close at now: the bid
+    for a long, the ask for a short.
+    """
+    if after <= dt.timedelta(0) or held < after:
+        return False
+    risk = abs(fill_price - initial_stop)
+    if risk <= 0:
+        return False
+    price = close if long else close + spread
+    gained = (price - fill_price) if long else (fill_price - price)
+    return gained < min_r * risk - _EPSILON
+
+
 # --------------------------------------------------------------------------- #
 # Outputs
 # --------------------------------------------------------------------------- #
@@ -460,6 +568,7 @@ class ExitReason(StrEnum):
     STOP = "stop"
     BREAKEVEN = "breakeven"
     TRAIL = "trail"
+    TIME = "time"  # the scalper's time stop (not at +time_stop_min_r R in time)
     END_OF_DATA = "end_of_data"
     MANUAL = "manual"  # closed by the kill switch (/stop)
 
@@ -610,6 +719,8 @@ class _Position:
     closed: list[Leg] = field(default_factory=list)
     tp1_done: bool = False
     breakeven_done: bool = False
+    tp2_done: bool = False
+    time_checked: bool = False  # the time stop has had its one look
 
     @property
     def long(self) -> bool:
@@ -630,10 +741,12 @@ class TradeBook:
         slippage_points: float,
         commission_per_lot: float,
         trail_after_tp1: bool,
+        management: Management | None = None,
     ) -> None:
         self._spec = spec
         self._risk_cfg = risk
         self._trail_after_tp1 = trail_after_tp1
+        self._management = management
         self._slippage = slippage_points * spec.point
         self._commission = commission_per_lot
         self._value = spec.value_per_price_unit
@@ -721,11 +834,19 @@ class TradeBook:
 
     # -- each bar ------------------------------------------------------------ #
 
-    def on_bar(self, bar: Bar, trail: TrailSource | None = None) -> list[BookEvent]:
-        """Apply one closed bar: fills, expiries, stops, targets, stop moves."""
+    def on_bar(
+        self,
+        bar: Bar,
+        trail: TrailSource | None = None,
+        line: StepLineSource | None = None,
+    ) -> list[BookEvent]:
+        """Apply one closed bar: fills, expiries, stops, targets, stop moves.
+
+        ``line`` gives the step-trail line for a book with ``Management.step_trail``.
+        """
         events: list[BookEvent] = []
         self._fill_orders(bar, events)
-        self._manage(bar, trail, events)
+        self._manage(bar, trail, line, events)
         return events
 
     def _fill_orders(self, bar: Bar, events: list[BookEvent]) -> None:
@@ -803,9 +924,10 @@ class TradeBook:
         plan = order.plan
         lots = order.lots
         risk_amount = abs(fill - plan.stop_loss) * lots * self._value
+        split = self._management.split if self._management is not None else None
         legs = [
             _OpenLeg(leg.lots, leg.target, leg.reason)
-            for leg in plan_legs(plan, lots, self._spec, self._risk_cfg)
+            for leg in plan_legs(plan, lots, self._spec, self._risk_cfg, split)
         ]
         return _Position(
             plan=plan,
@@ -820,7 +942,13 @@ class TradeBook:
             legs=legs,
         )
 
-    def _manage(self, bar: Bar, trail: TrailSource | None, events: list[BookEvent]) -> None:
+    def _manage(
+        self,
+        bar: Bar,
+        trail: TrailSource | None,
+        line: StepLineSource | None,
+        events: list[BookEvent],
+    ) -> None:
         for position in list(self._positions):
             if position.fill_time == bar.open_time:
                 continue  # filled on this bar: already checked by _fill_orders
@@ -838,10 +966,43 @@ class TradeBook:
                     self._close_leg(position, leg, leg.target, bar.close_time, leg.reason, events)
                     if leg.reason is ExitReason.TP1:
                         position.tp1_done = True
+                    elif leg.reason is ExitReason.TP2:
+                        position.tp2_done = True
             if not position.legs:
                 self._finish(position, events)
                 continue
-            self._move_stop(position, bar, trail, events)
+            if self._time_stop(position, bar, events):
+                continue
+            self._move_stop(position, bar, trail, line, events)
+
+    def _time_stop(self, position: _Position, bar: Bar, events: list[BookEvent]) -> bool:
+        """The scalper's time stop (``Management.time_stop``): one look, then closed or kept."""
+        rules = self._management
+        if rules is None or rules.time_stop is None or position.tp1_done:
+            return False
+        if position.time_checked:
+            return False
+        held = bar.close_time - position.fill_time
+        if held < rules.time_stop:
+            return False
+        position.time_checked = True
+        if not time_stop_due(
+            long=position.long,
+            fill_price=position.fill_price,
+            initial_stop=position.initial_stop,
+            close=bar.close,
+            spread=bar.spread,
+            held=held,
+            after=rules.time_stop,
+            min_r=rules.time_stop_min_r,
+        ):
+            return False
+        if position.long:
+            price = bar.close - self._slippage
+        else:
+            price = bar.close + bar.spread + self._slippage
+        self._close_all(position, float(price), bar.close_time, ExitReason.TIME, events)
+        return True
 
     def _check_stop(self, position: _Position, bar: Bar, events: list[BookEvent]) -> bool:
         """Close the whole position if this bar reached its stop. True when it did."""
@@ -863,13 +1024,19 @@ class TradeBook:
         return True
 
     def _move_stop(
-        self, position: _Position, bar: Bar, trail: TrailSource | None, events: list[BookEvent]
+        self,
+        position: _Position,
+        bar: Bar,
+        trail: TrailSource | None,
+        line: StepLineSource | None,
+        events: list[BookEvent],
     ) -> None:
         """Breakeven and trailing, effective from the next bar."""
         long = position.long
         sign = 1.0 if long else -1.0
         best = bar.high if long else bar.low + bar.spread  # the most favourable price reached
         before = position.stop
+        rules = self._management
         if not position.breakeven_done and breakeven_due(
             long=long,
             fill_price=position.fill_price,
@@ -879,9 +1046,44 @@ class TradeBook:
             at_r=self._risk_cfg.breakeven_at_r,
         ):
             position.breakeven_done = True
-            if (position.fill_price - position.stop) * sign > 0:
+            plus = None
+            if rules is not None and rules.breakeven_offset > 0:
+                plus = breakeven_plus_stop(
+                    long=long,
+                    stop=position.stop,
+                    fill_price=position.fill_price,
+                    offset=rules.breakeven_offset,
+                    close=bar.close,
+                    spread=bar.spread,
+                )
+            if plus is not None:
+                position.stop, position.stop_reason = plus, ExitReason.BREAKEVEN
+            elif (position.fill_price - position.stop) * sign > 0:
                 position.stop = position.fill_price
                 position.stop_reason = ExitReason.BREAKEVEN
+        if rules is not None and rules.stop_to_tp1_after_tp2 and position.tp2_done:
+            level = ladder_stop(
+                long=long,
+                stop=position.stop,
+                take_profit_1=position.plan.take_profit_1,
+                close=bar.close,
+                spread=bar.spread,
+            )
+            if level is not None:
+                position.stop, position.stop_reason = level, ExitReason.TRAIL
+        if rules is not None and rules.step_trail and line is not None:
+            value, atr = line.line_at(bar.close_ns)
+            buffer = rules.trail_buffer_atr * atr if not math.isnan(atr) else 0.0
+            level = step_trailed_stop(
+                long=long,
+                stop=position.stop,
+                line=value,
+                buffer=buffer,
+                close=bar.close,
+                spread=bar.spread,
+            )
+            if level is not None:
+                position.stop, position.stop_reason = level, ExitReason.TRAIL
         if position.tp1_done and self._trail_after_tp1 and trail is not None:
             swing_low, swing_high = trail.at(bar.close_ns)
             level = trailed_stop(
@@ -1085,6 +1287,8 @@ class TradeBook:
                     ],
                     "tp1_done": p.tp1_done,
                     "breakeven_done": p.breakeven_done,
+                    "tp2_done": p.tp2_done,
+                    "time_checked": p.time_checked,
                 }
                 for p in self._positions
             ],
@@ -1116,6 +1320,8 @@ class TradeBook:
                 ],
                 tp1_done=p["tp1_done"],
                 breakeven_done=p["breakeven_done"],
+                tp2_done=p.get("tp2_done", False),
+                time_checked=p.get("time_checked", False),
             )
             for p in state.get("positions", [])
         ]

@@ -1417,8 +1417,9 @@ own broker TP and SL (D90).
 **Recommended:** the scalper is Python (`goldsweep/scalping/`), the indicator only
 draws what Python writes and turns its buttons into commands. There is then no
 parity test and no Strategy Tester run of an EA; screenshots come from the demo
-chart and from a replay, and the backtest is Python's (D95). The owner chooses at
-the end of S0.
+chart and from a replay, and the backtest is Python's (D95).
+
+**Decision (owner, 2026-11-21):** Python, as recommended. S0 approved.
 
 ### D90. Broker-side targets for every child, not virtual ones
 
@@ -1517,3 +1518,65 @@ boxes, dashboard) from a `scalp.json` the bot writes, and its buttons (Adaptive
 Trail, Pause) write `scalp_commands.json`, which the bot reads like dashboard
 commands. It never trades. It shows STALE when the file stops updating. Symbol
 handling stays generic, with gold the only symbol.
+
+### D100. S1: the scalper's rules where the prompt left them open
+
+Built in `goldsweep/scalping/` (pure, one closed bar at a time) and in the shared
+trade book (`Management`, `breakeven_plus_stop`, `ladder_stop`, `step_trailed_stop`,
+`time_stop_due`; a book without `Management` behaves exactly as before):
+
+- **Step trail:** hl2 +/- 2 x ATR(10) (simple average, as the project's ATR), the
+  trend flips on a close through the line in force during the bar.
+- **Micro levels:** fractal swings with 2 bars each side (the main engine's rule),
+  usable for 15 bars from the pivot; twin bars within 0.05 ATR(14); the Asian and
+  London ranges once their window has ended (12 hours, or not at all if no bar came
+  within an hour of the end). A sweep needs 0.05 ATR beyond the level and a close
+  back inside on that bar or the next; a level is used once.
+- **`sweep_reclaim`:** trend down (or flipping down), a high swept within 6 bars, and
+  a bearish close below the sweep candle's low; one setup per sweep.
+  **`trail_rejection`** (the prompt gives no details): trend down and not flipping,
+  the bar's high touches the line in force while its body stays below, and a bearish
+  close below the previous bar's low. Mirrored for buys.
+- **Stop:** the X (or the rejection wick) plus 0.1 ATR (plus the spread for a short);
+  if that is outside 0.5-3 ATR from the entry, the step line is tried; else no trade.
+  **Ladder** 0.5 / 1.0 / 1.5 R, widened up to 2 R steps if TP1 is not 2x the round-trip
+  cost away, else no trade. Market entry at the next bar's open.
+- **Children** 40 / 30 / 30 with their own broker targets (D90). **Adaptive trail:**
+  after TP1 the stop goes to the entry plus slippage and commission ("breakeven+"),
+  after TP2 to TP1, and from the fill it follows the step line +/- 0.1 ATR; every move
+  only tightens. **Time stop:** one look 15 minutes after the fill: below +0.3 R and
+  not at TP1, it is closed.
+- **H1 filter:** the H1 structure bias (no news, no previous-day location in the
+  backtest) must allow the side; neutral allows both. The score (60, +10 for a
+  twin-bar or session-range level) is a label, not a filter.
+
+### D101. S1 verdict: the scalper loses after costs (2024-2026)
+
+`python -m goldsweep.scalping.backtest --from 2024-01-01 --to 2026-10-31`: 1,009,251
+stored M1 bars, 53,651 setups of both modes, every variant traded with the scalper's
+limits (0.25% a scalp, 8 a day, 1% daily loss, spread at most 1.5x its median) and the
+default costs, then again without costs:
+
+| Variant (M1) | Trades | A day | Won | Breakeven win rate | R per trade | Without costs |
+|---|---|---|---|---|---|---|
+| sweep_reclaim, H1 bias, 0.5 R (configured) | 4,447 | 5.0 | 53.7% | 69.1% | -0.20 | -0.02 |
+| sweep_reclaim, no filter, 2 R | 3,703 | 4.2 | 32.1% | 38.7% | -0.13 | -0.01 |
+| trail_rejection, H1 bias, 2 R | 1,025 | 1.2 | 29.2% | 35.8% | -0.16 | +0.04 |
+| trail_rejection, no filter, 2 R | 1,356 | 1.5 | 30.0% | 35.7% | -0.14 | +0.06 |
+
+All eight M1 variants lose after costs (-0.13 to -0.22 R a trade; the configured one
+would have lost 88% of the test balance). Before costs they are flat (-0.04 to +0.06
+R): the setups themselves show no edge, and the costs (spread, slippage, commission)
+take 0.1-0.2 R from every trade, because a one-minute stop is only a few dollars.
+The same rules on M5 bars lose less but still lose in every variant (-0.04 to -0.15 R
+after costs, -0.05 to +0.06 R without). No session, direction, level kind, hour or
+year is positive in a way that is more than noise.
+
+**Read with care.** Bars only: inside a bar a stop and a target count as the stop, which
+is harsh at one minute; a tick replay (S6) would remove that, but it cannot remove the
+costs, which alone exceed every gross result measured. There is no historical news
+calendar. Results on the past do not predict the future in either direction.
+
+**Decision:** the scalper stays off (`scalper.enabled: false`) and is not wired into
+the live bot. S2-S6 wait for the owner's decision on this result. The code, tests and
+report stay, so any change to the rules can be measured the same way.

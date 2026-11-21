@@ -295,4 +295,38 @@ confluence:
     symbol_candidates: [XAGUSD, XAGUSD.m, XAGUSDm, SILVER]
     lookback_bars: 24
 
+# The M1 scalper add-on (docs/SCALPER_SPEC.md, docs/SCALPER_PLAN.md, D88-D99). It runs
+# alongside the main strategy, never instead of it. Off: phase S1 only tests it.
+# python -m goldsweep.scalping.backtest --from 2024-01-01 --to 2026-10-31
+scalper:
+  enabled: false
+  timeframe: M1
+  strategy: sweep_reclaim        # sweep_reclaim | trail_rejection
+  sessions: [asia, london, newyork, overlap]
+  htf_filter: true               # only with the H1 bias (or when it is neutral)
+  atr_period: 14
+  step_trail: {atr_period: 10, multiplier: 2.0}
+  swing_bars: 2                  # bars each side that confirm a micro swing
+  micro_lookback: 15
+  sweep_min_atr: 0.05
+  sweep_window: 6
+  twin_bars_tolerance_atr: 0.05
+  sl_buffer_atr: 0.10
+  sl_min_atr: 0.5
+  sl_max_atr: 3.0
+  tp_step_r: 0.5                 # TP1/TP2/TP3 at 0.5/1.0/1.5 R; 2.0 = the "wide" ladder
+  tp_step_r_max: 2.0
+  split: [0.4, 0.3, 0.3]         # the three children's shares (TP1, TP2, TP3)
+  adaptive_trail: true           # breakeven+ after TP1, stop to TP1 after TP2, step trail
+  risk:
+    risk_per_scalp_pct: 0.25     # all three children together
+    max_scalps_per_day: 8
+    daily_loss_limit_pct: 1.0
+    max_consecutive_losses: 3    # then paused for 24 hours
+    cooldown_sec: 300            # no same-direction scalp this long after a stop-out
+    time_stop_sec: 900           # not at TP1 and below +0.3 R after 15 minutes: closed
+    time_stop_min_r: 0.3
+    max_spread_multiple: 1.5
+    cost_multiple: 2.0           # TP1 at least 2x the round-trip cost away
+
 display_timezone: Africa/Kampala

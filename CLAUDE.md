@@ -9,6 +9,9 @@ and planned in `docs/SCALPER_PLAN.md`; where the two differ, the plan and D88-D9
 apply (the prompt assumes a "section 7c" and files that never existed here). It runs
 alongside the main strategy, never instead of it. Never copy the third-party product
 it shows (name, mascot, logo, artwork); the `reference/` folder stays out of git.
+Its logic is `goldsweep/scalping/` (one closed bar at a time, like the main engine);
+its position rules are the trade book's `Management` (shared, so S2's live executor
+must use the same functions). S1 found it loses after costs (D101): it stays off.
 
 ## How the work is organised
 
@@ -146,6 +149,7 @@ python main.py --check           environment report against MetaTrader 5
 python -m goldsweep.backtest --from 2024-01-01 --to 2026-10-31   backtest report
 python -m goldsweep.backtest --from 2026-01-05 --to 2026-01-30 --mock   offline
 python -m goldsweep.backtest --from 2024-01-01 --to 2026-10-31 --candidates   A+ playbooks as if approved
+python -m goldsweep.scalping.backtest --from 2024-01-01 --to 2026-10-31      scalper add-on (S1, D101)
 python main.py --news [--no-llm] [--mock]   calendar, headlines, news bias, scenarios
 python main.py --paper [--mock] [--no-llm]  paper trading loop (Ctrl+C stops it)
 python main.py --live [--no-llm]            live trading (MODE=LIVE + mode: LIVE + typed confirmation)
