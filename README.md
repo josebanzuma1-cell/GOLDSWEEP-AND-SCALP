@@ -29,7 +29,8 @@ review after each one.
 | 6 | Live execution on a demo account, three-target split, on-chart panel | built, tested, approved |
 | 7 | Streamlit dashboard: chart, scenarios, news, trades, risk, equity, backtests, kill switch | built, tested, approved |
 | 8 | Unattended running (Task Scheduler, /golive), heartbeat, watchdog, backups, VPS guide | built, tested, approved |
-| 9 | More trades and "sniper" entries: (1) entries that fill and never wait into a blocked time, (2) M1 refinement, (3) more setup models | built and tested, awaiting approval: entries wait 2 hours (D82), M1 refinement left off (D83), breakeven only at TP1 (D84), new models alert only (D85) |
+| 9 | More trades and "sniper" entries: (1) entries that fill and never wait into a blocked time, (2) M1 refinement, (3) more setup models | built and tested: entries wait 2 hours (D82), M1 refinement left off (D83), breakeven only at TP1 (D84), new models alert only (D85) |
+| 10 | Session playbooks: A+ grades, per-session strategy from the evidence, monitoring before auto-trading | stage 1 (analysis and candidates, D86) built and tested, awaiting approval; stage 2 (monitoring, `/approve`) next |
 
 Only `python main.py --live` sends orders to a broker, and only after
 `MODE=LIVE` in `.env`, `mode: LIVE` in `config.yaml` and the account number typed
@@ -71,6 +72,15 @@ models:`). Every alert also lists its confluences: Unicorn (the gap sits on a
 breaker block), balanced price range, Judas swing (the raid ran beyond the New
 York midnight open), Silver Bullet hour, OTE, and gold-silver SMT divergence. They
 are recorded, not scored, so the demo account can show which ones matter.
+
+**Session playbooks (D86).** Each session (Asian/Tokyo, London, New York) has a
+playbook in `config.yaml playbooks:`: the rule that auto-trades there now, and an
+A+ *candidate* found by `python -m goldsweep.playbook`, which tries four models
+(sweep + MSS, CISD, continuation, and a breakout model) under score, confluence and
+trend conditions (daily, 4-hour and 200 EMA trend) and keeps a rule only if it was
+best on the first two-thirds of the history and also positive on the last third.
+On 2024-2026 that gave London and New York the same A+ rule (the current model
+with the Judas tag) and Asia none. A candidate is monitored before it may trade.
 
 A score measures how complete a setup is, not how likely it is to win. Every
 setup can lose; the stop-loss is what keeps that loss small. The choices made

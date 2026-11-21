@@ -21,7 +21,7 @@ def only_spec_model(settings: Settings) -> Settings:
 
     off = ModelConfig(enabled=False, trade=False)
     models = settings.config.models.model_copy(
-        update={"cisd": off, "silver_bullet": off, "continuation": off}
+        update={"cisd": off, "continuation": off, "breakout": off}
     )
     return dataclasses.replace(
         settings, config=settings.config.model_copy(update={"models": models})

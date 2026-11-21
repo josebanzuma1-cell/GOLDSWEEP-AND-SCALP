@@ -64,6 +64,7 @@ from goldsweep.analysis.structure import (
     find_cisd,
     find_mss,
     find_swings,
+    strongest_displacement,
 )
 from goldsweep.analysis.zones import (
     Zone,
@@ -93,15 +94,12 @@ log = get_logger(__name__)
 
 #: Session name of a setup allowed only by post-news sweep mode (spec 5.6).
 POST_NEWS = "post_news"
-#: Session name of a setup of the Silver Bullet model (D85).
-SILVER_BULLET = "silver_bullet"
 _SESSION_CODES = {
     LONDON: "LDN",
     NEW_YORK: "NY",
     ASIA: "ASIA",
     OVERLAP: "OVL",
     POST_NEWS: "NEWS",
-    SILVER_BULLET: "SB",
 }
 _CRT_KINDS = frozenset({PoolKind.CRT_HIGH, PoolKind.CRT_LOW})
 _ZONE_SHARE = {
@@ -111,7 +109,8 @@ _ZONE_SHARE = {
     ZoneKind.BREAKER: 0.5,
 }
 _NEW_YORK_TZ = ZoneInfo("America/New_York")
-#: ICT's Silver Bullet hours, in New York time (D85).
+#: ICT's Silver Bullet hours, in New York time: a confluence tag (D85; the model
+#: that traded only these hours was replaced by session playbooks, D86).
 SILVER_BULLET_WINDOWS = (
     (dt.time(3), dt.time(4)),
     (dt.time(10), dt.time(11)),
@@ -132,17 +131,31 @@ class ModelSpec:
     name: str
     code: str  # added to signal ids; "" for the spec's model
     confirmation: str = "mss"  # mss | cisd
-    windows: str = "kill_zones"  # kill_zones | silver_bullet
     pools: str = "external"  # external | internal (only with the H1 trend)
+    kind: str = "sweep"  # sweep (fade the raid) | breakout (follow the break, D86)
 
 
 SWEEP_MSS = ModelSpec("sweep_mss", "")
 MODELS: dict[str, ModelSpec] = {
     "sweep_mss": SWEEP_MSS,
     "cisd": ModelSpec("cisd", "CISD", confirmation="cisd"),
-    "silver_bullet": ModelSpec("silver_bullet", "SB", windows="silver_bullet"),
     "continuation": ModelSpec("continuation", "CONT", pools="internal"),
+    "breakout": ModelSpec("breakout", "BRK", kind="breakout"),
 }
+#: Levels the breakout model trades the break of: the session ranges and the
+#: previous day (the Asian-range break at the London open, and the like).
+BREAKOUT_KINDS = frozenset(
+    {
+        PoolKind.ASIAN_HIGH,
+        PoolKind.ASIAN_LOW,
+        PoolKind.LONDON_HIGH,
+        PoolKind.LONDON_LOW,
+        PoolKind.NEWYORK_HIGH,
+        PoolKind.NEWYORK_LOW,
+        PoolKind.PREVIOUS_DAY_HIGH,
+        PoolKind.PREVIOUS_DAY_LOW,
+    }
+)
 _SECONDARY_SESSION_SHARE = 0.6  # overlap and Asia score less than the two kill zones
 _EPSILON = 1e-9
 _ORDER_BLOCK_LOOKBACK = 5
@@ -472,7 +485,11 @@ class SignalEngine:
                     hours=cfg.liquidity.max_pool_age_hours
                 )
                 track.pool = pool = pool.as_swept()
-                if self._model.pools == "internal":
+                if self._model.kind == "breakout":
+                    if not BREAKOUT_KINDS.intersection(pool.sources):
+                        del self._tracks[key]  # breakouts of session ranges and the day only
+                        continue
+                elif self._model.pools == "internal":
                     if pool.is_external:  # the continuation model raids internal pools only
                         del self._tracks[key]
                         continue
@@ -498,6 +515,26 @@ class SignalEngine:
             )
             direction = pool.side.trade_direction
             if result.status is SweepStatus.PENDING:
+                continue
+            if self._model.kind == "breakout":
+                del self._tracks[key]
+                if result.status is SweepStatus.SWEPT:
+                    self._reject(now, pool, direction, "swept back inside: not a breakout")
+                    continue
+                signal = self._breakout(
+                    window,
+                    atr,
+                    pool,
+                    pierce,
+                    hourly,
+                    now,
+                    bar_open,
+                    spread_points,
+                    news_bias,
+                    median_spread,
+                )
+                if signal is not None:
+                    found.append((key, signal))
                 continue
             if result.status is not SweepStatus.SWEPT or result.event is None:
                 self._reject(now, pool, direction, "the level broke: no close back inside in time")
@@ -576,6 +613,75 @@ class SignalEngine:
                 found.append((key, signal))
 
         return self._one_per_raid(found)
+
+    def _breakout(
+        self,
+        window: pd.DataFrame,
+        atr: np.ndarray,
+        pool: Pool,
+        pierce: int,
+        hourly: pd.DataFrame,
+        now: dt.datetime,
+        bar_open: dt.datetime,
+        spread_points: float,
+        news_bias: float,
+        median_spread: float | None,
+    ) -> Signal | None:
+        """A session-range or previous-day level that broke and held (D86).
+
+        The trade follows the break: a long when highs broke. The bar that first
+        closed beyond the level plays the part of the shift (it must belong to a leg
+        with a displacement candle); the leg's start plays the part of the sweep's
+        extreme (the stop goes beyond it); the entry is the gap the leg left, on the
+        retest. Everything after that is the spec's pipeline (:meth:`_build`).
+        """
+        cfg = self._cfg
+        direction = pool.side.trade_direction.opposite
+        sign = direction.sign
+        open_ = window["open"].to_numpy(dtype="float64")
+        high = window["high"].to_numpy(dtype="float64")
+        low = window["low"].to_numpy(dtype="float64")
+        close = window["close"].to_numpy(dtype="float64")
+        last = len(window) - 1
+        beyond = np.flatnonzero((close[pierce : last + 1] - pool.price) * sign > 0)
+        if len(beyond) == 0:
+            return None
+        broke = pierce + int(beyond[0])
+        first = max(0, pierce - cfg.mss_window)
+        leg = (low if direction is Direction.LONG else high)[first : pierce + 1]
+        offset = int(np.argmin(leg) if direction is Direction.LONG else np.argmax(leg))
+        origin_index = first + offset
+        origin = float(leg[offset])
+        best = strongest_displacement(
+            open_, high, low, close, atr, direction, max(origin_index, 1), last, self._rule
+        )
+        if best is None:
+            self._reject(now, pool, direction, "no displacement in the breakout")
+            return None
+        sweep = SweepEvent(
+            pool=pool,
+            direction=direction,
+            pierce_index=pierce,
+            pierce_time=window.index[pierce].to_pydatetime(),
+            reclaim_index=broke,
+            reclaim_time=window.index[broke].to_pydatetime(),
+            extreme=origin,
+            extreme_index=origin_index,
+            depth=abs(origin - pool.price),
+            bars_to_reclaim=broke - pierce,
+        )
+        mss = MssEvent(
+            direction=direction,
+            index=broke,
+            time=window.index[broke].to_pydatetime(),
+            level=pool.price,
+            swing_index=pierce,
+            displacement_index=best[0],
+            displacement_atr=best[1],
+        )
+        return self._build(
+            window, atr, sweep, mss, hourly, now, bar_open, spread_points, news_bias, median_spread
+        )
 
     def _confirm(
         self,
@@ -743,24 +849,14 @@ class SignalEngine:
         reward_2 = (take_profit_2 - entry) * sign / risk if take_profit_2 is not None else None
 
         at_open, at_close = self._sessions.status(bar_open), self._sessions.status(now)
-        if self._model.windows == "silver_bullet":
-            if at_open.blocked or at_close.blocked:
-                reasons = at_close.reasons if at_close.blocked else at_open.reasons
-                self._reject(now, pool, direction, "; ".join(reasons))
-                return None
-            if not in_silver_bullet(bar_open):
-                self._reject(now, pool, direction, "outside the Silver Bullet hours")
-                return None
-            session, allowed = SILVER_BULLET, True
-        else:
-            session, allowed = at_open.session, at_open.allowed
-            if not allowed and not at_open.blocked and not at_close.blocked:
-                if any(start <= bar_open < end for start, end in self._news_windows):
-                    session, allowed = POST_NEWS, True
-            if not allowed or at_close.blocked:
-                reasons = at_close.reasons if at_close.blocked else at_open.reasons
-                self._reject(now, pool, direction, "; ".join(reasons))
-                return None
+        session, allowed = at_open.session, at_open.allowed
+        if not allowed and not at_open.blocked and not at_close.blocked:
+            if any(start <= bar_open < end for start, end in self._news_windows):
+                session, allowed = POST_NEWS, True
+        if not allowed or at_close.blocked:
+            reasons = at_close.reasons if at_close.blocked else at_open.reasons
+            self._reject(now, pool, direction, "; ".join(reasons))
+            return None
 
         levels = self._levels
         previous_mid = levels.previous_mid if levels is not None else None
@@ -1020,7 +1116,7 @@ class SignalEngine:
             bias_share = 1.0  # a setup against the bias never gets this far
         news_share = _clip(0.5 + 0.5 * sign * bias.news)
 
-        if session in (LONDON, NEW_YORK, POST_NEWS, SILVER_BULLET):
+        if session in (LONDON, NEW_YORK, POST_NEWS):
             session_share = 1.0
         elif session is not None:
             session_share = _SECONDARY_SESSION_SHARE

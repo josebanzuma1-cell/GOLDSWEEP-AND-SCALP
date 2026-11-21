@@ -160,6 +160,8 @@ def test_built_in_defaults_equal_the_shipped_config(settings: Settings, tmp_path
     """An empty config file must behave exactly like the shipped one (apart from the
     owner's mode switch, which an empty file leaves at PAPER, and the owner's
     recorded changes, which an empty file leaves at the spec's values)."""
+    from goldsweep.core.settings import PlaybooksConfig
+
     spec_values = {key: spec for key, (spec, _) in OWNER_CHANGES.items()}
     spec_risk = {key: spec for key, (spec, _) in OWNER_RISK_CHANGES.items()}
     shipped = settings.config.model_copy(
@@ -167,8 +169,18 @@ def test_built_in_defaults_equal_the_shipped_config(settings: Settings, tmp_path
             "mode": Mode.PAPER,
             "strategy": settings.config.strategy.model_copy(update=spec_values),
             "risk": settings.config.risk.model_copy(update=spec_risk),
+            # The candidates come from the playbook analysis (D86), not from defaults.
+            "playbooks": settings.config.playbooks.model_copy(
+                update={
+                    name: getattr(settings.config.playbooks, name).model_copy(
+                        update={"candidate": None}
+                    )
+                    for name in ("asia", "london", "newyork")
+                }
+            ),
         }
     )
+    assert shipped.playbooks == PlaybooksConfig()
     assert load(write_text(tmp_path, "")).config == shipped
 
 

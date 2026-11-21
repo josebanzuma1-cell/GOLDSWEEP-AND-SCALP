@@ -1226,3 +1226,86 @@ carried them did clearly better), but these are six tags compared after the fact
 about 50 trades: a filter chosen this way would be fitted to the past. They are
 recorded on every alert and every demo trade, so the demo account can confirm or
 refute them on new data before any of them becomes a filter.
+
+## Phase 10: session playbooks, A+ setups, monitoring before auto-trading
+
+### D86. A playbook per session, chosen on two-thirds and checked on the rest
+
+**The owner's request** (2026-11-21): trade the Asian (Tokyo), London and New York
+sessions; spot A+ setups; find a strategy for each session by analysis and monitor
+it before it auto-trades. Choices (all the recommended ones): the Silver Bullet
+model is replaced by session playbooks; A+ is set from the evidence per session;
+London and New York keep auto-trading the validated model meanwhile; a session's
+candidate goes live after 20 monitored trades with a positive average and the
+owner's `/approve <session>` (stage 2). The owner then asked for trend, structure
+and further strategies to be researched and included.
+
+**What was built (stage 1).**
+
+- The Silver Bullet *model* is gone (its hours remain a confluence tag). Models:
+  `sweep_mss`, `cisd`, `continuation`, and a new `breakout`: a session range
+  (Asian, London, New York) or the previous day's high/low that breaks and holds
+  (no close back inside within 3 bars) with a displacement candle; the trade
+  follows the break, entered on the retest of the gap the leg left, stop beyond the
+  leg's start, targets at the next liquidity. It reuses the sweep detector's "the
+  level broke" verdict and the rest of the spec's pipeline.
+- Trend and structure **context tags** (`analysis/context.py`), added after the
+  engine from closed H1 bars (H4 and daily anchored to the 17:00 New York day):
+  `d1_trend`, `h4_trend` (swing structure points the trade's way), `ema_trend` (the
+  H1 200 EMA side), `weekly_value` (discount of the previous week for longs, premium
+  for shorts), `high_vol` (H1 ATR over 1.2x its 120-hour median). The H1 swing
+  structure was already in the score (bias) and the M5 structure in every setup.
+- **Grades** (`analysis/grades.py`): A+ when a setup meets its session's candidate
+  rule, A when it clears the alert threshold, B otherwise. Sessions for playbooks:
+  asia, london, newyork (the overlap and post-news windows count as New York).
+- **Playbook rules** (`config.yaml playbooks:`): per session a `trading` rule (what
+  auto-trades now: London and New York the validated model at 60; Asia nothing) and
+  a `candidate`. A rule: model, minimum score, `tags_any` (at least one), `min_tags`
+  (a count of confluence tags), `tags_all` (every one, e.g. a trend).
+- **The analysis** (`python -m goldsweep.playbook`): with setups allowed in the
+  Asian session, each session x model is traded under 108 fixed rules (432 in all
+  per session): score 60 / 70 / 80; none / Unicorn / Judas / either; 0 / 1 / 2
+  confluence tags; no trend / daily / 4-hour / 200 EMA. A rule needs 15 trades in
+  the first two-thirds of 2024-01-01..2026-10-31 (to 2025-12-01), is chosen there by
+  R per trade (ties to fewer conditions), and must be positive both there and on the
+  held-out last third, which played no part in choosing it; otherwise the session
+  has no candidate (the runner-up is not tried).
+
+**Research.** The sources (community and vendor material, one replication of an
+academic opening-range study) give definitions but no reliable evidence: trend
+filters on gold are reported without independent figures; one replication of an
+opening-range breakout study found it profitable before costs and about zero
+after; for gold, several describe London's break of the Asian range as a stop run
+that reverses (what the sweep model trades). So everything was measured here.
+
+**Results** (`reports/playbook/report.html`):
+
+| Session | Candidate | First two-thirds | Held-out third |
+|---|---|---|---|
+| Asia (Tokyo) | none: the best rule (cisd, 1+ confluence tag, daily trend; +0.67 R per trade) lost on the held-out part | | |
+| London | sweep + MSS, score 60+, **with Judas** | 16 trades, +1.50 R per trade | 10 trades, +1.06 R |
+| New York | sweep + MSS, score 60+, **with Judas** | 16 trades, +0.70 R per trade | 8 trades, +1.31 R |
+
+The trend conditions and the breakout model were tried everywhere but never
+reached 15 trades in the choosing part with a better result: the rules that rank
+highest on R per trade rest on one to four trades (a breakout rule in Asia: one
+trade, +9.38 R; its one held-out trade lost), which is exactly what the 15-trade
+minimum is there to ignore. A trend filter on the spec's model cut its sample below
+the minimum, so on this history it cannot be judged. The same candidates came out
+of the smaller first run (before the trend tags and the breakout model).
+
+**Read with care.** 432 rules per session were tried, so the best is flattered even
+after the held-out check; the held-out parts hold 8 to 10 trades. A candidate is a
+hypothesis: it is monitored on new data before it may trade (stage 2), and the
+London and New York candidates are subsets of what already trades there (the Judas
+setups), so their monitoring is a check of the filter, not of new trades.
+
+Across all sessions, the trades of today's trading rule (55, +0.93 R each) split by
+the new tags: `h4_trend` 18 trades, +1.44 R; `weekly_value` 32, +1.20 R; `high_vol`
+9, +1.37 R; `d1_trend` 15, +0.86 R; `ema_trend` 18, +0.45 R (worse than average).
+Too few per session to choose on; they are recorded on every alert for monitoring.
+The acceptance backtest with the shipped config is unchanged by this stage.
+
+**Decision:** the candidates above are in `config.yaml` (Asia none); in this stage
+they only label setups A+. `sessions.asia.trade` stays false until stage 2 routes
+Asian setups to monitoring, so nothing new can trade before then.

@@ -25,7 +25,7 @@ from goldsweep.ai.news_bias import NewsBias
 from goldsweep.ai.scenarios import ScenarioBrief
 from goldsweep.analysis.pressure import PressureReading
 from goldsweep.analysis.refine import RefineSetup
-from goldsweep.analysis.signals import POST_NEWS, SILVER_BULLET, Signal
+from goldsweep.analysis.signals import POST_NEWS, Signal
 from goldsweep.analysis.zones import ZoneKind
 from goldsweep.core.clock import SESSION_LABELS
 from goldsweep.data.calendar import EconomicEvent
@@ -45,8 +45,8 @@ _ENTRY_SPOT = {
 _MODEL_NAMES = {
     "sweep_mss": "sweep + MSS",
     "cisd": "CISD",
-    "silver_bullet": "Silver Bullet",
     "continuation": "continuation",
+    "breakout": "breakout",
 }
 _TAG_NAMES = {
     "smt": "SMT (silver held)",
@@ -55,6 +55,11 @@ _TAG_NAMES = {
     "judas": "Judas swing (beyond the NY midnight open)",
     "silver_bullet": "Silver Bullet hour",
     "ote": "OTE (62-79% pullback)",
+    "d1_trend": "daily trend",
+    "h4_trend": "4-hour trend",
+    "ema_trend": "H1 200 EMA side",
+    "weekly_value": "weekly discount/premium",
+    "high_vol": "high volatility",
 }
 
 
@@ -65,8 +70,6 @@ def model_name(model: str) -> str:
 def session_name(session: str | None) -> str:
     if session == POST_NEWS:
         return "post-news window"
-    if session == SILVER_BULLET:
-        return "Silver Bullet hour"
     return SESSION_LABELS.get(session or "", "outside the kill zones")
 
 

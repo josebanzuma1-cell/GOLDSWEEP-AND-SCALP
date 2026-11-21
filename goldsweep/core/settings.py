@@ -699,10 +699,61 @@ class ModelsConfig(_StrictModel):
     sweep_mss: ModelConfig = ModelConfig(trade=True)
     #: The same, confirmed by a change in the state of delivery instead of the shift.
     cisd: ModelConfig = ModelConfig()
-    #: The same, only inside the New York 03-04, 10-11 and 14-15 windows.
-    silver_bullet: ModelConfig = ModelConfig()
     #: Sweeps of internal (minor) pools, only in the direction of the H1 trend.
     continuation: ModelConfig = ModelConfig()
+    #: Breaks of the session ranges and the previous day that hold (D86).
+    breakout: ModelConfig = ModelConfig()
+
+
+ModelName = Literal["sweep_mss", "cisd", "continuation", "breakout"]
+#: Confluence tags (D85) and trend/structure context tags (D86) a rule may ask for.
+SignalTag = Literal[
+    "smt",
+    "unicorn",
+    "bpr",
+    "judas",
+    "silver_bullet",
+    "ote",
+    "d1_trend",
+    "h4_trend",
+    "ema_trend",
+    "weekly_value",
+    "high_vol",
+]
+
+
+class PlaybookRule(_StrictModel):
+    """Which setups a session playbook takes (D86): one model, a minimum score
+    (raised by the neutral-bias extra, as everywhere), and the tags it needs."""
+
+    model: ModelName = "sweep_mss"
+    min_score: float = Field(default=60, ge=0, le=100)
+    #: At least one of these tags (none listed: no such condition).
+    tags_any: tuple[SignalTag, ...] = ()
+    #: At least this many confluence tags (smt, unicorn, bpr, judas, silver_bullet, ote).
+    min_tags: int = Field(default=0, ge=0, le=6)
+    #: Every one of these tags (e.g. a trend condition such as d1_trend).
+    tags_all: tuple[SignalTag, ...] = ()
+
+
+class SessionPlaybook(_StrictModel):
+    """One session's playbook (D86)."""
+
+    #: What auto-trades in this session now (None: nothing).
+    trading: PlaybookRule | None = None
+    #: The A+ playbook found by the analysis: monitored on a shadow book before it
+    #: may trade, and graded A+ in alerts (None: no candidate).
+    candidate: PlaybookRule | None = None
+
+
+class PlaybooksConfig(_StrictModel):
+    """Phase 10 (D86): a strategy per session, A+ setups, monitored before trading."""
+
+    asia: SessionPlaybook = SessionPlaybook()
+    london: SessionPlaybook = SessionPlaybook(trading=PlaybookRule())
+    newyork: SessionPlaybook = SessionPlaybook(trading=PlaybookRule())
+    #: Finished monitored trades before the owner is asked to approve a candidate.
+    monitor_trades: int = Field(default=20, ge=1, le=500)
 
 
 class SmtConfig(_StrictModel):
@@ -738,6 +789,7 @@ class AppConfig(_StrictModel):
     broker: BrokerConfig = BrokerConfig()
     models: ModelsConfig = ModelsConfig()
     confluence: ConfluenceConfig = ConfluenceConfig()
+    playbooks: PlaybooksConfig = PlaybooksConfig()
     display_timezone: ZoneName = "Africa/Kampala"
 
     @model_validator(mode="after")

@@ -262,8 +262,27 @@ broker:
 models:
   sweep_mss:      {enabled: true, trade: true}    # the spec's model
   cisd:           {enabled: true, trade: false}   # confirmed by a CISD instead of the MSS
-  silver_bullet:  {enabled: true, trade: false}   # New York 03-04, 10-11, 14-15 only
   continuation:   {enabled: true, trade: false}   # internal pools, with the H1 trend
+  breakout:       {enabled: true, trade: false}   # session-range / previous-day breaks that hold (D86)
+  # (The Silver Bullet model was replaced by session playbooks, D86; the Silver
+  # Bullet hours remain a confluence tag.)
+
+# Session playbooks (Phase 10, D86). Per session: what auto-trades there now
+# (trading) and the A+ playbook the analysis found (candidate). A candidate is
+# graded A+ in alerts and paper-traded on a shadow book; after monitor_trades
+# finished trades with a positive average the bot asks for /approve <session>.
+# python -m goldsweep.playbook --from 2024-01-01 --to 2026-10-31 suggests them.
+playbooks:
+  asia:                        # the Asian (Tokyo) session
+    trading: null
+    candidate: null
+  london:
+    trading: {model: sweep_mss, min_score: 60, tags_any: [], min_tags: 0}
+    candidate: {model: sweep_mss, min_score: 60, tags_any: [judas], min_tags: 0}   # D86
+  newyork:                     # including the London-NY overlap and post-news setups
+    trading: {model: sweep_mss, min_score: 60, tags_any: [], min_tags: 0}
+    candidate: {model: sweep_mss, min_score: 60, tags_any: [judas], min_tags: 0}   # D86
+  monitor_trades: 20
 
 # Extra evidence recorded on every signal as tags (it does not change the score).
 confluence:

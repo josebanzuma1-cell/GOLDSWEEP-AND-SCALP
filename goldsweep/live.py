@@ -45,6 +45,7 @@ from goldsweep.ai.scenarios import ScenarioBuilder, build_context, due_triggers
 from goldsweep.alerts import messages
 from goldsweep.alerts.telegram import Command, Notifier, TelegramBot, make_notifier
 from goldsweep.analysis.bias import compute_bias
+from goldsweep.analysis.context import ContextFrames, with_context
 from goldsweep.analysis.indicators import latest_atr
 from goldsweep.analysis.pressure import STRUCTURE_BARS, PressureReading, pressure_meter
 from goldsweep.analysis.refine import (
@@ -95,6 +96,9 @@ WITHDRAW_LEAD = dt.timedelta(minutes=1)
 REFINE_CONTEXT_BARS = CONTEXT_BARS
 REFINE_MAX_BARS = 2000
 REFINE_GRACE = dt.timedelta(minutes=5)
+#: H1 bars read for the trend and structure context tags (D86): enough for the
+#: 200 EMA, the daily structure and the previous week.
+CONTEXT_HOURS = 2000
 MEDIAN_SPREAD_MIN_SAMPLES = 30
 EXIT_OK, EXIT_BROKER, EXIT_REFUSED, EXIT_NOT_CONFIRMED = 0, 1, 2, 3
 
@@ -273,6 +277,19 @@ class Trader:
             for s in signals
         ]
 
+    def _with_context(self, signals: list[Signal]) -> list[Signal]:
+        """Trend and structure tags (D86), from the broker's H1 bars."""
+        if not signals:
+            return signals
+        try:
+            hourly = self._broker.get_rates(self.spec.name, Timeframe.H1, CONTEXT_HOURS)
+        except BrokerError as exc:
+            log.warning("H1 bars not available: no context tags", error=str(exc))
+            return signals
+        boundary = self._config.strategy.liquidity.day_boundary
+        frames = ContextFrames.from_hourly(hourly, boundary)
+        return [with_context(s, frames) for s in signals]
+
     # -- state ------------------------------------------------------------------ #
 
     @property
@@ -370,7 +387,7 @@ class Trader:
             )
             if getattr(self._config.models, name).enabled:
                 signals += found
-        signals = self._with_smt(signals, trigger)
+        signals = self._with_context(self._with_smt(signals, trigger))
         self._market = {
             "trigger": trigger,
             "liquidity": liquidity,

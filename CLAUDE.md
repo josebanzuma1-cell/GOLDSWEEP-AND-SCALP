@@ -86,8 +86,8 @@ XAUUSD-only trading assistant. The full specification is `docs/SPEC.md`
   D84), applied wherever a plan is made (simulator, `live.py`, refined plans), before
   `with_deadline`. Reaching TP1 always moves the stop to breakeven (the owner's
   rule); `breakeven_at_r: 0` only turns off the move by distance.
-- **Setup models** (D85): `analysis/signals.py::MODELS` (sweep_mss, cisd,
-  silver_bullet, continuation), each run as its own `SignalEngine(model=...)`.
+- **Setup models** (D85, D86): `analysis/signals.py::MODELS` (sweep_mss, cisd,
+  continuation, breakout), each run as its own `SignalEngine(model=...)`.
   `config.yaml models:` says which are enabled and which may trade; the rest alert
   only. Backtests generate signals for the trading models only, each with its own
   cache entry. Duplicate checks in `live.py` are per model. Confluence tags
@@ -95,6 +95,15 @@ XAUUSD-only trading assistant. The full specification is `docs/SPEC.md`
   reported, never scored; SMT is added after the engine (`analysis/smt.py`) from
   silver bars. Tests that follow the spec's model end to end use
   `tests.helpers.only_spec_model`.
+- **Session playbooks** (D86): `config.yaml playbooks:` gives each session (asia,
+  london, newyork; the overlap and post-news count as newyork) a `trading` rule and an
+  A+ `candidate` rule (`PlaybookRule`: model, min_score, tags_any, min_tags counting
+  confluence tags only, tags_all). `analysis/grades.py` grades A+/A/B; the context
+  tags (`analysis/context.py`: d1_trend, h4_trend, ema_trend, weekly_value,
+  high_vol) are added after the engine like SMT, from H1 bars anchored to the 17:00
+  New York day. `python -m goldsweep.playbook` picks candidates: chosen on the first
+  two-thirds, positive on the held-out third, at least 15 trades. A candidate is
+  monitored before it may trade; never switch one to trading without the owner.
 - **Only `execution/mt5_gateway.py` sends orders.** Tests drive it with
   `tests/fake_mt5_trading.py` (a fake trade server); never send orders from tests.
   Real-terminal checks use `order_check` only, which validates without trading.

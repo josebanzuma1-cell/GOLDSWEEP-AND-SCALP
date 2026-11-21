@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from goldsweep.analysis.context import CONTEXT_TAGS, ContextFrames, with_context
 from goldsweep.analysis.pressure import STRUCTURE_BARS, pressure_meter
 from goldsweep.analysis.refine import M1Refinement
 from goldsweep.analysis.signals import MODELS, SignalEngine
@@ -395,8 +396,22 @@ def limitations(settings: Settings, data: MarketData, *, events: Sequence[NewsEv
     return notes
 
 
-#: Confluence tags in report order (D85).
-CONFLUENCE_TAGS = ("smt", "unicorn", "bpr", "judas", "silver_bullet", "ote")
+#: Confluence (D85) and trend/structure context (D86) tags, in report order.
+CONFLUENCE_TAGS = ("smt", "unicorn", "bpr", "judas", "silver_bullet", "ote", *CONTEXT_TAGS)
+
+
+def tag_context(
+    settings: Settings, data: MarketData, records: Sequence[SignalRecord]
+) -> list[SignalRecord]:
+    """Add the trend and structure context tags (cheap, so never cached)."""
+    if not records:
+        return []
+    hourly = aggregate_candles(data.trigger, Timeframe.H1)
+    frames = ContextFrames.from_hourly(hourly, settings.config.strategy.liquidity.day_boundary)
+    return [
+        dataclasses.replace(record, signal=with_context(record.signal, frames))
+        for record in records
+    ]
 
 
 def tag_smt(
@@ -467,7 +482,7 @@ def run_backtest(
         records += found
         cached = cached and reused
     records.sort(key=lambda record: record.time)
-    records = tag_smt(settings, data, records)
+    records = tag_context(settings, data, tag_smt(settings, data, records))
     simulator = build_simulator(settings, data, events=events)
     threshold = (
         strategy.auto_trade_threshold

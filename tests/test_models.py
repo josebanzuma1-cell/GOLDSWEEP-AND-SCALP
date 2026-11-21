@@ -134,10 +134,9 @@ def test_each_model_on_the_textbook_raid(settings: Settings) -> None:
     (cisd,) = model_run(settings, "cisd").signals
     # The CISD level (the open of the run into the low) sits below the swing high.
     assert (cisd.model, cisd.id, cisd.mss.level) == ("cisd", "2026-11-17-LDN-CISD-01", 2029.1)
-    bullet = model_run(settings, "silver_bullet")
-    assert bullet.signals == []  # 02:50 New York is outside its hours
-    assert any(r.reason == "outside the Silver Bullet hours" for r in bullet.rejections)
     assert model_run(settings, "continuation").signals == []  # the Asian low is external
+    # The Silver Bullet model was replaced by session playbooks; breakout was added (D86).
+    assert set(MODELS) == {"sweep_mss", "cisd", "continuation", "breakout"}
 
 
 def test_confluence_tags_on_the_textbook_raid(settings: Settings) -> None:
