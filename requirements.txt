@@ -1,0 +1,22 @@
+# GoldSweep runtime dependencies (Phase 1). Later phases append their own.
+# Python 3.11 or newer; 3.13 recommended.
+# Tested on 2026-11-15 with Python 3.13.17 and: pandas 3.1.1, numpy 2.5.4,
+# pydantic 2.14.3, pydantic-settings 2.16.3, PyYAML 6.0.3, tzdata 2026.6, MetaTrader5 5.0.6231.
+pydantic>=2.7,<3
+pydantic-settings>=2.3,<3
+PyYAML>=6.0.1
+pandas>=2.2
+numpy>=1.26
+# IANA time-zone database. Windows has none built in, so zoneinfo needs this.
+tzdata>=2024.1
+# Windows only, and it needs the MetaTrader 5 terminal installed.
+MetaTrader5>=5.0.5000; sys_platform == "win32"
+# Phase 4: the AI headline classifier (Anthropic API) and HTTPS certificate checks
+# against the operating system's trust store. Tested with anthropic 2.9.0, truststore 0.10.4.
+anthropic>=2.9,<3
+truststore>=0.10
+# Phase 5: the scheduler of the live loop. Tested with APScheduler 3.11.3.
+APScheduler>=3.11,<4
+# Phase 7: the dashboard. Tested with streamlit 1.67.0 and plotly 6.9.0.
+streamlit>=1.40,<2
+plotly>=5.24,<7

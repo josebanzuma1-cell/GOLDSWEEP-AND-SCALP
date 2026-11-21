@@ -1,0 +1,244 @@
+# GoldSweep configuration: strategy, session and risk parameters.
+#
+# * Secrets (API keys, MT5 login) never go here. They live in .env.
+# * Unknown or duplicated keys stop the program at startup, so a typo cannot
+#   silently fall back to a default.
+# * Always quote clock times ("15:00"). Unquoted, YAML reads 15:00 as the
+#   number 900, and the program refuses to start.
+
+symbol_candidates: [XAUUSD, XAUUSD.m, XAUUSDm, GOLD]
+
+# PAPER never sends orders. LIVE needs "mode: LIVE" here AND "MODE=LIVE" in
+# .env AND a typed confirmation at startup. Any disagreement means PAPER.
+mode: LIVE
+
+timeframes: {bias: H1, liquidity: M15, trigger: M5}
+
+sessions:
+  # Every window is written in its own local time zone and converted to UTC
+  # for each day, so daylight-saving changes need no edits here.
+  asia:    {tz: Asia/Tokyo,       start: "09:00", end: "15:00", trade: false}
+  london:  {tz: Europe/London,    start: "07:00", end: "10:00", trade: true}
+  newyork: {tz: America/New_York, start: "08:00", end: "11:00", trade: true}
+  # London-NY overlap = the hours when both full sessions below are open.
+  overlap:
+    trade: true
+    london:  {tz: Europe/London,    start: "08:00", end: "16:30"}
+    newyork: {tz: America/New_York, start: "08:00", end: "17:00"}
+  # No new trades: daily rollover, wide spreads.
+  rollover_block: {tz: America/New_York, start: "16:45", end: "18:15"}
+  # No new trades on Friday from this time on.
+  friday_cutoff: {tz: America/New_York, time: "12:00"}
+  # Weekly close (Friday) and reopen (Sunday) of the gold market.
+  weekend: {tz: America/New_York, close: "17:00", open: "18:00"}
+  # false: new trades only inside the windows marked trade: true (the spec).
+  # true: at any hour the market is open (rollover, Friday cutoff, weekend and
+  # news blackouts still apply; setups outside the kill zones score lower).
+  trade_all_hours: false
+
+strategy:
+  atr_period: 14
+  atr_method: sma              # sma = the ATR MetaTrader 5 draws | wilder
+  swing_lookback: 3
+  eq_tolerance_atr: 0.15
+  min_sweep_atr: 0.10
+  max_bars_back_inside: 3
+  mss_window: 12
+  mss_structure_lookback: 30   # how far back the last lower high / higher low may lie (M5 bars)
+  displacement_atr: 1.2        # a body of at least 1.2 x ATR counts as displacement, or ...
+  displacement_body_ratio: 0.70      # ... a body of at least 70% of the candle's range
+  displacement_min_range_atr: 1.0    #     on a candle at least 1 ATR tall
+  fvg_min_atr: 0.05            # ignore fair value gaps smaller than this share of ATR
+  entry_mode: fvg_mid          # fvg_top | fvg_mid | fvg_bottom | market
+  entry_zone_priority: [fvg, ifvg, order_block]
+  fib_low: 0.62
+  fib_high: 0.79
+  sl_buffer_atr: 0.10
+  min_rr: 2.0
+  entry_expiry_bars: 6
+  alert_threshold: 60
+  auto_trade_threshold: 75
+  liquidity:
+    swing_points: true         # unswept M15 swing highs/lows are liquidity pools
+    major_swing_lookback: 10   # bars each side that make a swing point a major (external) one
+    trendlines: true           # three or more swing points on one line
+    trendline_min_touches: 3
+    round_number_step: 10.0
+    round_number_major_step: 50.0
+    min_sweep_pool_strength: 0.5   # weaker pools are tracked but do not start a setup
+    max_pool_age_hours: 48
+    day_boundary: {tz: America/New_York, time: "17:00"}   # where a trading day ends
+  bias:
+    structure_weight: 0.5      # H1 swing structure
+    location_weight: 0.2       # premium / discount against the previous day's midpoint
+    news_weight: 0.3           # news bias (arrives in Phase 4; counts as 0 until then)
+    threshold: 0.25            # score needed for LONG / SHORT; below it the bias is NEUTRAL
+    neutral_extra_score: 5     # extra points a signal needs while the bias is NEUTRAL
+  crt:                         # Candle Range Theory
+    enabled: true
+    timeframe: H4              # H1 or H4, anchored to the 17:00 New York close
+    max_age_candles: 2
+  scoring:                     # points per component; must add up to 100
+    sweep_quality: 20
+    displacement: 15
+    entry_zone: 10
+    fib: 5
+    htf_bias: 15
+    news_bias: 10
+    kill_zone: 10
+    spread: 5
+    premium_discount: 5
+    crt: 5
+
+news:
+  # No new entries from 30 min before to 15 min after a high-impact release:
+  # every high-impact event in these currencies, plus any event whose title
+  # contains one of the keywords.
+  blackout_before_min: 30
+  blackout_after_min: 15
+  blackout_currencies: [USD]
+  # (FOMC member speeches are not on the list: only the decision, minutes and
+  # press conference, and the Fed Chair.)
+  blackout_keywords: [CPI, Non-Farm, NFP, FOMC Statement, FOMC Meeting Minutes,
+                      FOMC Press Conference, FOMC Economic Projections, Federal Funds Rate,
+                      Fed Chair, PCE, GDP, ISM, Retail Sales, Unemployment Claims,
+                      Jobless Claims]
+  # After a high-impact release, allow setups from 15 to 90 min later even
+  # outside the kill zones (the first spike often sweeps a nearby pool).
+  post_news_sweep_mode: true
+  post_news_start_min: 15
+  post_news_end_min: 90
+  # As a blackout starts, a trade at least this many R up moves its stop to
+  # breakeven (spec 5.6). 0 turns it off.
+  breakeven_before_news_r: 1.0
+  headline_half_life_min: 120   # a headline's weight halves every 2 hours
+  # AI headline classifier. The provider, key and model are set in .env
+  # (LLM_PROVIDER, its key, LLM_MODEL). Without a key, with llm_enabled false,
+  # or once a limit below is reached, keyword rules classify instead.
+  llm_enabled: true
+  llm_daily_budget_usd: 0.50
+  # Leave these empty to use the provider's defaults: Claude Haiku 5.5 costs
+  # 0.10 / 0.50 US$ per million tokens with no call cap; Groq's free plan costs
+  # nothing and is capped at 6 calls a minute and 180 a day.
+  llm_input_usd_per_mtok:
+  llm_output_usd_per_mtok:
+  llm_max_calls_per_minute:
+  llm_max_calls_per_day:
+  llm_prefilter: true   # headlines with no gold-related words skip the model
+  # Calendar sources, tried in this order. FinanceCalendar.com needs
+  # FINANCECALENDAR_API_KEY in .env; its free plan allows 10 requests a day.
+  # On a paid plan, set refresh_min: 15 and fast_refresh_min: 1 (spec 5.6).
+  # The Forex Factory feed needs no key but has no actual figures.
+  calendar_sources:
+    - {name: financecalendar, refresh_min: 180, daily_request_limit: 10}
+    - {name: forexfactory, refresh_min: 60}   # it answers 429 to frequent polling
+  fast_window_min: 10
+  # Headlines: Finnhub (FINNHUB_API_KEY in .env) and these RSS feeds.
+  finnhub_categories: [forex, general]
+  rss_feeds:
+    - {name: Federal Reserve, url: "https://www.federalreserve.gov/feeds/press_all.xml"}
+    - {name: ECB, url: "https://www.ecb.europa.eu/rss/press.html"}
+    - {name: FXStreet, url: "https://www.fxstreet.com/rss/news"}
+  headline_poll_min: 5
+  headline_max_age_hours: 12
+  # Pre-session scenario briefs.
+  scenario_before_session_min: 30
+  scenario_before_event_min: 60
+
+risk:
+  risk_per_trade_pct: 0.5      # hard maximum 2.0
+  max_open_positions: 1
+  max_trades_per_day: 3
+  daily_loss_limit_pct: 2.0
+  weekly_loss_limit_pct: 5.0
+  max_consecutive_losses: 3
+  breakeven_at_r: 1.0
+  # Spec 7b: each trade is split into up to three positions with the same entry
+  # and stop: 50% to TP1 (nearest pool), 30% to TP2 (next pool), the rest to TP3.
+  partial_close_at_tp1_pct: 50
+  partial_close_at_tp2_pct: 30
+  tp3_r: 3.0     # TP3 this many R from the entry; 0 = no TP3 (its share goes to TP2)
+  max_trades_per_session: 2
+  # Spread filter: no new trade while the spread is above 2x its 20-day median.
+  max_spread_multiple: 2.0
+  spread_median_days: 20
+
+# Buyer/seller pressure meter. An ESTIMATE: spot gold has no central exchange,
+# so MT5 "tick volume" counts price changes, not contracts bought or sold.
+# Shown with alerts and on the dashboard; it does not change signal scores.
+pressure:
+  timeframe: M15
+  window: 24              # bars (24 x M15 = the last 6 hours)
+  balanced_band: 0.10     # |score| below this reads "balanced"
+  strong_level: 0.40      # |score| from this reads "strong buyers / sellers"
+  weights:                # must add up to 1.0
+    volume: 0.40          # where bars close in their range, weighted by tick volume
+    candles: 0.25         # size of up-candle bodies against down-candle bodies
+    structure: 0.15       # H1 swing structure (up / down / range)
+    news: 0.20            # news bias (headlines and upcoming events, Phase 4)
+
+backtest:
+  initial_balance: 10000
+  warmup_days: 10
+  trade_threshold: auto_trade   # auto_trade | alert
+  trail_after_tp1: true
+  use_m1_for_fills: true        # when one-minute history is stored
+  costs:
+    spread_source: bar          # bar | fixed
+    fixed_spread_points: 25
+    extra_spread_points: 0
+    slippage_points: 10         # market entries and stop-loss exits
+    commission_per_lot: 7.0     # round trip, account currency
+  walk_forward:
+    train_months: 6
+    test_months: 2
+    min_train_trades: 20
+    grid:
+      auto_trade_threshold: [65, 75, 85]
+      min_rr: [2.0, 2.5, 3.0]
+
+# The live loop. PAPER (the default mode) simulates every order: nothing is sent.
+execution:
+  auto_trade: true        # trade signals that clear auto_trade_threshold
+  bar_delay_seconds: 2    # read each M5 bar this long after it closes
+  bar_wait_seconds: 30    # keep asking this long if the broker is late with it
+  # LIVE only (python main.py --live, needs MODE=LIVE in .env AND mode: LIVE here):
+  magic_number: 7341926   # marks the bot's own orders and positions in MT5
+  deviation_points: 30    # largest accepted price difference on a market order
+  max_total_lots: 1.0     # never more lots than this open at once
+  min_margin_level_pct: 1000   # refuse orders that would take margin level below this
+  allow_real_account: false    # Phase 6 trades DEMO accounts only
+  sync_seconds: 5         # compare orders and positions with MT5 this often
+  # The on-chart panel: signals.json in MT5's Common\Files\GoldSweep folder,
+  # drawn by mt5/GoldSweepPanel.mq5 (see README).
+  panel_enabled: true
+  panel_signals: 10
+
+# Telegram alerts: set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env.
+alerts:
+  telegram_enabled: true
+  send_blocked: true          # also report setups the risk rules blocked, with why
+  send_scenarios: true
+  pre_news_warning_min: 15
+  daily_summary_time: "21:00"
+  daily_summary_tz: America/New_York
+  heartbeat_minutes: 60     # a quiet "still running" message this often (0 = never)
+  watchdog_minutes: 15      # --watchdog alerts when the bot is silent this long
+
+# Daily upkeep: a copy of the database in data/backups, and old log rows removed.
+housekeeping:
+  backup_time_utc: "00:15"
+  backups_kept: 14
+  log_days: 30
+
+broker:
+  # MetaTrader 5 reports bar and tick times in the broker's SERVER clock, not
+  # in UTC. GoldSweep converts them to true UTC with this rule:
+  #   auto            measure it from a live tick (recommended)
+  #   "NY+7"          New York time + 7h: most FX/CFD brokers (UTC+2 winter, UTC+3 summer)
+  #   "Europe/Athens" server follows EU daylight-saving dates
+  #   "UTC"           server runs on UTC
+  #   "+02:00"        fixed offset, no daylight saving
+  server_timezone: auto
+
+display_timezone: Africa/Kampala

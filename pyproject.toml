@@ -1,0 +1,29 @@
+# Tool configuration only. GoldSweep is run from this folder (python main.py),
+# so it is not packaged; dependencies live in requirements*.txt.
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers --strict-config"
+# Any warning fails the suite, so a deprecation is fixed when it appears, not when it bites.
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["goldsweep"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@abstractmethod",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]

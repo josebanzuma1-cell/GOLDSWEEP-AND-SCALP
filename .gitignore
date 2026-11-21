@@ -1,0 +1,27 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Runtime data
+/data/
+/logs/
+/reports/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# MetaTrader build output
+*.ex5
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
