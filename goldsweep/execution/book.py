@@ -470,6 +470,12 @@ def trailed_stop(
 
 
 class StepLineSource(Protocol):
+    """The line a ``Management.step_trail`` stop follows.
+
+    A source may also offer ``line_for(close_ns, long)`` for a different line per side
+    (the swing mode's channel low for longs, high for shorts); the book prefers it.
+    """
+
     def line_at(self, close_ns: int) -> tuple[float, float]:
         """(step-trail line, ATR) after the bar closing at ``close_ns``; NaN when not ready."""
         ...
@@ -497,6 +503,27 @@ class Management:
     trail_buffer_atr: float = 0.0
     time_stop: dt.timedelta | None = None
     time_stop_min_r: float = 0.0
+    #: Charge the symbol's overnight swap for each night a position is held (S4).
+    swap: bool = False
+
+
+def swap_nights(opened: dt.datetime, closed: dt.datetime, triple_day: int) -> int:
+    """Nights charged for holding through ``(opened, closed]``: one per 00:00 UTC rollover
+    after a weekday, three after ``triple_day`` (MT5 numbering: 0 Sunday ... 3 Wednesday),
+    none after Saturday or Sunday (the triple day pays for the weekend): seven a week.
+
+    The broker's own rollover hour may differ by a few hours; for positions held for
+    days this changes nothing that matters (a limitation stated in D110).
+    """
+    first, last = ensure_utc(opened), ensure_utc(closed)
+    midnight = first.replace(hour=0, minute=0, second=0, microsecond=0) + dt.timedelta(days=1)
+    nights = 0
+    while midnight <= last:
+        day_before = (midnight - dt.timedelta(days=1)).weekday()  # Python: Monday 0
+        if day_before < 5:
+            nights += 3 if (day_before + 1) % 7 == triple_day else 1
+        midnight += dt.timedelta(days=1)
+    return nights
 
 
 def breakeven_plus_stop(
@@ -609,8 +636,9 @@ class Leg:
     exit_price: float
     exit_time: dt.datetime
     reason: ExitReason
-    pnl: float  # after commission
+    pnl: float  # after commission and swap
     commission: float
+    swap: float = 0.0  # overnight financing this part paid (negative) or earned (S4)
 
 
 @dataclass(frozen=True, slots=True)
@@ -657,6 +685,11 @@ class Trade:
     @property
     def commission(self) -> float:
         return sum(leg.commission for leg in self.legs)
+
+    @property
+    def swap(self) -> float:
+        """Overnight financing over the trade (negative: paid), included in ``net_pnl``."""
+        return sum(leg.swap for leg in self.legs)
 
     @property
     def r_multiple(self) -> float:
@@ -714,6 +747,7 @@ class _OpenLeg:
     lots: float
     target: float | None
     reason: ExitReason
+    swap: float = 0.0  # accrued while open, paid when it closes
 
 
 @dataclass
@@ -996,6 +1030,19 @@ class TradeBook:
             if self._time_stop(position, bar, events):
                 continue
             self._move_stop(position, bar, trail, line, events)
+            self._charge_swap(position, bar)
+
+    def _charge_swap(self, position: _Position, bar: Bar) -> None:
+        """Overnight financing for every part still open at the bar's close (S4)."""
+        rules = self._management
+        if rules is None or not rules.swap:
+            return
+        nights = swap_nights(bar.open_time, bar.close_time, self._spec.swap_rollover3days)
+        rate = self._spec.swap_per_lot(position.long)
+        if not nights or not rate:
+            return
+        for leg in position.legs:
+            leg.swap += rate * leg.lots * nights
 
     def _time_stop(self, position: _Position, bar: Bar, events: list[BookEvent]) -> bool:
         """The scalper's time stop (``Management.time_stop``): one look, then closed or kept."""
@@ -1094,7 +1141,8 @@ class TradeBook:
             if level is not None:
                 position.stop, position.stop_reason = level, ExitReason.TRAIL
         if rules is not None and rules.step_trail and line is not None:
-            value, atr = line.line_at(bar.close_ns)
+            sided = getattr(line, "line_for", None)  # a line per side (S4: channel low/high)
+            value, atr = sided(bar.close_ns, long) if sided else line.line_at(bar.close_ns)
             buffer = rules.trail_buffer_atr * atr if not math.isnan(atr) else 0.0
             level = step_trailed_stop(
                 long=long,
@@ -1144,8 +1192,8 @@ class TradeBook:
     ) -> None:
         sign = 1.0 if position.long else -1.0
         commission = self._commission * leg.lots
-        pnl = (price - position.fill_price) * sign * leg.lots * self._value - commission
-        closed = Leg(leg.lots, price, when, reason, pnl, commission)
+        pnl = (price - position.fill_price) * sign * leg.lots * self._value - commission + leg.swap
+        closed = Leg(leg.lots, price, when, reason, pnl, commission, leg.swap)
         position.closed.append(closed)
         position.legs.remove(leg)
         self.manager.book(when, pnl)
@@ -1295,7 +1343,7 @@ class TradeBook:
                     "stop_reason": p.stop_reason.value,
                     "lots": p.lots,
                     "risk_amount": p.risk_amount,
-                    "legs": [[leg.lots, leg.target, leg.reason.value] for leg in p.legs],
+                    "legs": [[leg.lots, leg.target, leg.reason.value, leg.swap] for leg in p.legs],
                     "closed": [
                         [
                             c.lots,
@@ -1304,6 +1352,7 @@ class TradeBook:
                             c.reason.value,
                             c.pnl,
                             c.commission,
+                            c.swap,
                         ]
                         for c in p.closed
                     ],
@@ -1334,10 +1383,19 @@ class TradeBook:
                 lots=p["lots"],
                 risk_amount=p["risk_amount"],
                 legs=[
-                    _OpenLeg(lots, target, ExitReason(reason)) for lots, target, reason in p["legs"]
+                    _OpenLeg(leg[0], leg[1], ExitReason(leg[2]), leg[3] if len(leg) > 3 else 0.0)
+                    for leg in p["legs"]
                 ],
                 closed=[
-                    Leg(c[0], c[1], dt.datetime.fromisoformat(c[2]), ExitReason(c[3]), c[4], c[5])
+                    Leg(
+                        c[0],
+                        c[1],
+                        dt.datetime.fromisoformat(c[2]),
+                        ExitReason(c[3]),
+                        c[4],
+                        c[5],
+                        c[6] if len(c) > 6 else 0.0,
+                    )
                     for c in p["closed"]
                 ],
                 tp1_done=p["tp1_done"],

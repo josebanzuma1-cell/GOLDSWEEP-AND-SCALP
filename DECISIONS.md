@@ -1716,3 +1716,50 @@ the same history would only fit its noise, so nothing was tuned.
 **Decision:** the intraday mode does not run; `scalping/modes.py` says so on `/scalper
 intraday` and refuses `/approve scalper intraday`. Next: S4, the swing mode, on daily
 bars from 2014.
+
+### D110. S4: the swing mode fails its evidence test, and cannot be sized here
+
+**Built** (`goldsweep/scalping/swing.py`, `swing_backtest.py`, config `scalper.swing`):
+
+- **Swap.** `SymbolSpec` now carries the broker's swap terms (`swap_mode`, `swap_long`,
+  `swap_short`, `swap_rollover3days`; `swap_per_lot`), read by the MT5 client. The trade
+  book charges it per child for each night held when `Management.swap` is on
+  (`swap_nights`: one per 00:00 UTC rollover after a weekday, three after Wednesday,
+  none after the weekend; `Trade.swap`, included in the result). XAUUSDm today: longs
+  pay 431.6 points (43.16) a lot a night, shorts nothing. Main-strategy backtests do not
+  charge swap, as before (their trades rarely stay overnight; a stated limitation).
+- **History.** The broker's H4 bars since 2014-01-13 (16,561), downloaded once,
+  read-only, with the symbol facts refreshed (`swing.h4_fetched_from` remembers it);
+  daily bars are UTC days built from them, weekend stubs left out.
+- **Rules**, one closed day at a time: Donchian breakout (a close beyond the last 55
+  days), 12-month momentum (decided on each month's first day, closed when the next
+  month begins through `close_by`), pullback (above the 200-day average with the
+  50-day above it, a close back across the 20-day average; mirrored). First stop 2
+  daily ATRs; ladders 2/4/6 R and 3/6/10 R; breakeven+ at TP1, the stop to TP1 after
+  TP2; breakouts and pullbacks trail the last 20 days' low (high) through a per-side
+  line (`line_for`); managed on H4 bars; swap every night. Same gate as D109 with 30+
+  trades.
+
+**Results** (2014-01-01..2026-10-31; `reports/swing_2014-01-01_2026-10-31*`):
+
+- **Size.** The median first stop of the last year is 189 an ounce, so the minimum
+  0.01 lot risks 189: 0.25% a trade needs a balance of about 76,000. At the test's
+  10,000, 205 of 257 breakout setups, 119 of 141 momentum ones and 136 of 157 pullbacks
+  could not be sized (none in the last four years); on this 1,071 account one minimum
+  trade would risk about 18%.
+- **Edge, measured at a notional 1,000,000** so that the minimum lot does not decide:
+
+| Rule (chosen ladder) | Trades | R per trade | First 2/3 (2014-2022) | Held-out 1/3 (2022-2026) | Without costs |
+|---|---|---|---|---|---|
+| Donchian breakout (2/4/6 R) | 66 | +0.10 | -0.04 (41) | +0.32 (25) | +0.22 |
+| Momentum (2/4/6 R) | 136 | +0.03 | -0.17 (86) | +0.38 (50) | +0.10 |
+| Pullback (2/4/6 R) | 69 | +0.03 | -0.27 (45) | +0.60 (24) | +0.19 |
+
+All three are slightly positive overall, but only because of the held-out years, gold's
+2022-2026 rise from about 1,700 to over 4,000; over 2014-2022 every rule lost. Swap took
+a large share (about 19,000-32,000 on the notional million). A rule that only works in
+one strong trend is the trend, not an edge the gate can accept.
+
+**Decision:** the swing mode does not run (`modes.py` says why); with S1 (D101) and S3
+(D109) every scalper mode tested so far has failed. The tick mode (S5) needs 8 weeks of
+recorded ticks and a VPS under 20 ms; the recorder runs since 2026-11-22.

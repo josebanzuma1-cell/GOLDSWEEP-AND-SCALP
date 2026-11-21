@@ -33,7 +33,15 @@ REGISTRY: dict[str, ModeInfo] = {
         "S3",
         note="its three rules failed their evidence test in S3 (D109)",
     ),
-    "swing": ModeInfo("swing", "swing (days to weeks)", "S4"),
+    "swing": ModeInfo(
+        "swing",
+        "swing (days to weeks)",
+        "S4",
+        note=(
+            "its three rules failed their evidence test in S4 (D110), and its minimum lot "
+            "needs a balance of about 76,000 at 0.25% a trade"
+        ),
+    ),
 }
 MODE_NAMES = tuple(REGISTRY)
 

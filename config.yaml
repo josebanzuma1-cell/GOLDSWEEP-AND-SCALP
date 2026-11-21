@@ -362,5 +362,21 @@ scalper:
     vwap_slope_bars: 6
     swing_bars: 6                # VWAP-trend stop beyond these bars' extreme
     min_trades: 100              # the evidence gate (D103)
+  # The swing mode (S4, D110): daily trend rules held for days, swap paid each night.
+  # They failed their evidence test (negative over 2014-2022), and a 0.01 lot needs a
+  # balance of about 76,000 at 0.25% a trade, so the mode does not run.
+  # python -m goldsweep.scalping.swing_backtest --from 2014-01-01 --to 2026-10-31
+  #   [--offline] [--balance 1000000 to measure R without the minimum lot deciding]
+  swing:
+    rules: [donchian_breakout, momentum, pullback]
+    breakout_days: 55            # a close beyond the last 55 days' extreme
+    exit_days: 20                # the stop then trails the last 20 days' low (high)
+    momentum_months: 12          # the sign of the 12-month return, re-decided monthly
+    trend_days: 200              # pullback: with the 200-day average's trend...
+    pullback_days: 20            # ...a close back across the 20-day average
+    atr_days: 20
+    stop_atr: 2.0                # the first stop, in daily ATRs
+    ladders: [[2.0, 4.0, 6.0], [3.0, 6.0, 10.0]]   # R steps tried; chosen on the first 2/3
+    min_trades: 30               # the evidence gate (D103)
 
 display_timezone: Africa/Kampala

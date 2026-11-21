@@ -881,6 +881,42 @@ class IntradayConfig(_StrictModel):
         return self
 
 
+SwingRule = Literal["donchian_breakout", "momentum", "pullback"]
+
+
+class SwingConfig(_StrictModel):
+    """The scalper's swing mode (S4, D110): daily trend rules, held for days, swap paid."""
+
+    rules: tuple[SwingRule, ...] = ("donchian_breakout", "momentum", "pullback")
+    #: Donchian breakout: a close beyond the last ``breakout_days`` days' extreme.
+    breakout_days: int = Field(default=55, ge=5, le=500)
+    #: The trailing exit: the stop follows the last ``exit_days`` days' low (high).
+    exit_days: int = Field(default=20, ge=2, le=500)
+    #: Momentum: the sign of the return over this many months, re-decided monthly.
+    momentum_months: int = Field(default=12, ge=1, le=36)
+    #: Pullback: with the trend of the ``trend_days`` average (and the 50-day above or
+    #: below it), a close back across the ``pullback_days`` average.
+    trend_days: int = Field(default=200, ge=20, le=500)
+    pullback_days: int = Field(default=20, ge=5, le=200)
+    atr_days: int = Field(default=20, ge=2, le=200)
+    #: The first stop: this many daily ATRs from the entry.
+    stop_atr: float = Field(default=2.0, gt=0, le=20)
+    #: TP ladders tried, in R; each rule's is chosen on the first two-thirds.
+    ladders: tuple[tuple[float, ...], ...] = ((2.0, 4.0, 6.0), (3.0, 6.0, 10.0))
+    #: The evidence gate (D103).
+    min_trades: int = Field(default=30, ge=1, le=100_000)
+
+    @field_validator("ladders")
+    @classmethod
+    def _ladders_rise(cls, value: tuple[tuple[float, ...], ...]) -> tuple[tuple[float, ...], ...]:
+        if not value:
+            raise ValueError("scalper.swing.ladders needs at least one ladder")
+        for ladder in value:
+            if not 1 <= len(ladder) <= 3 or list(ladder) != sorted(set(ladder)) or ladder[0] <= 0:
+                raise ValueError("each swing ladder needs one to three rising positive R steps")
+        return value
+
+
 class ScalperConfig(_StrictModel):
     """The scalper add-on's settings (docs/SCALPER_SPEC.md, D88-D107).
 
@@ -915,6 +951,7 @@ class ScalperConfig(_StrictModel):
     adaptive_trail: bool = True
     risk: ScalperRiskConfig = ScalperRiskConfig()
     intraday: IntradayConfig = IntradayConfig()
+    swing: SwingConfig = SwingConfig()
 
     @field_validator("split")
     @classmethod

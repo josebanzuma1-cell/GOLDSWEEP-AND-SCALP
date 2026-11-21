@@ -27,6 +27,10 @@ latency arbitrage, news spikes, grids, martingale, hedging and stacking are neve
 - **Flat-by** (S3, D109): `TradePlan.close_by` closes a position at the first bar close
   at or after it (`close_by_due`, exit `session_end`); the live executor must apply the
   same rule when a mode that uses it goes live. The intraday mode failed (D109).
+- **Swap** (S4, D110): `SymbolSpec.swap_*` from the broker; the book charges it only with
+  `Management(swap=True)` (`swap_nights`: seven nights a week, triple after Wednesday).
+  A step-trail line may offer `line_for(close_ns, long)` for a line per side. The swing
+  mode failed (D110); `modes.py` notes say why each failed mode does not run.
 
 ## How the work is organised
 
@@ -166,6 +170,7 @@ python -m goldsweep.backtest --from 2026-01-05 --to 2026-01-30 --mock   offline
 python -m goldsweep.backtest --from 2024-01-01 --to 2026-10-31 --candidates   A+ playbooks as if approved
 python -m goldsweep.scalping.backtest --from 2024-01-01 --to 2026-10-31      scalper add-on (S1, D101)
 python -m goldsweep.scalping.intraday_backtest --from 2024-01-01 --to 2026-10-31   intraday mode (S3, D109)
+python -m goldsweep.scalping.swing_backtest --from 2014-01-01 --to 2026-10-31 [--offline]   swing mode (S4, D110)
 python main.py --news [--no-llm] [--mock]   calendar, headlines, news bias, scenarios
 python main.py --paper [--mock] [--no-llm]  paper trading loop (Ctrl+C stops it)
 python main.py --live [--no-llm]            live trading (MODE=LIVE + mode: LIVE + typed confirmation)

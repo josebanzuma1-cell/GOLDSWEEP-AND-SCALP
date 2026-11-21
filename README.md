@@ -31,7 +31,7 @@ review after each one.
 | 8 | Unattended running (Task Scheduler, /golive), heartbeat, watchdog, backups, VPS guide | built, tested, approved |
 | 9 | More trades and "sniper" entries: (1) entries that fill and never wait into a blocked time, (2) M1 refinement, (3) more setup models | built and tested: entries wait 2 hours (D82), M1 refinement left off (D83), breakeven only at TP1 (D84), new models alert only (D85) |
 | 10 | Session playbooks: A+ grades, per-session strategy from the evidence, monitoring before auto-trading | built, tested, approved: candidates from the analysis (D86), shadow-book monitoring, `/approve`, Asia on (D87) |
-| S | Scalper add-on alongside the main strategy (`docs/SCALPER_SPEC.md`): M1 scalps, step trail, three-child ladder, chart dashboard, MT5 assistant | S0 approved (Python engine, D89); S1 (logic, tests, first backtest) built: it loses after costs in every variant (D101), so it stays off. Research on tick ("HFT"), intraday and swing modes with a switch between them: `docs/SCALPER_MODES.md` (D102-D107), approved. S2 (the switch, the tick recorder, latency, costs; D108) approved. S3 (intraday mode: Asian breakout, New York opening range, VWAP trend) built and tested: all three lose after costs, so the mode does not run (D109); awaiting approval |
+| S | Scalper add-on alongside the main strategy (`docs/SCALPER_SPEC.md`): M1 scalps, step trail, three-child ladder, chart dashboard, MT5 assistant | S0 approved (Python engine, D89); S1 (logic, tests, first backtest) built: it loses after costs in every variant (D101), so it stays off. Research on tick ("HFT"), intraday and swing modes with a switch between them: `docs/SCALPER_MODES.md` (D102-D107), approved. S2 (the switch, the tick recorder, latency, costs; D108) approved. S3 (intraday mode) built and tested: all three rules lose after costs, so the mode does not run (D109), approved. S4 (swing mode: Donchian, momentum, pullback, swap charged) built and tested: negative over 2014-2022, positive only in the 2022-2026 rise, and a 0.01 lot needs about 76,000 at 0.25%; the mode does not run (D110); awaiting approval |
 
 Only `python main.py --live` sends orders to a broker, and only after
 `MODE=LIVE` in `.env`, `mode: LIVE` in `config.yaml` and the account number typed
@@ -102,7 +102,9 @@ may open trades and `/scalper off|tick|intraday|swing` chooses the scalper's mod
 evidence test and the owner sends `/approve scalper <mode>`; before that it runs on
 paper, and a mode not built yet does nothing. The first scalper rules lost after
 costs (D101), and so did the intraday mode's three rules (D109:
-`python -m goldsweep.scalping.intraday_backtest --from 2024-01-01 --to 2026-10-31`). For the tick mode the bot records every gold tick from the broker into
+`python -m goldsweep.scalping.intraday_backtest --from 2024-01-01 --to 2026-10-31`) and
+the swing mode's (D110: `python -m goldsweep.scalping.swing_backtest --from 2014-01-01
+--to 2026-10-31`, which also downloads the H4 history once and charges the swap). For the tick mode the bot records every gold tick from the broker into
 `data/ticks/<symbol>/<day>/<hour>.npz` (about 0.3 MB a busy hour, some 5-8 MB a
 trading day; the broker itself keeps only two weeks), and `/status` shows the latency: the terminal's ping and how
 long recent orders took.

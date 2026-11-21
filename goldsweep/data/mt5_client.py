@@ -151,6 +151,10 @@ def _spec_from_info(info: Any) -> SymbolSpec:
         currency_base=str(getattr(info, "currency_base", "")),
         currency_profit=str(getattr(info, "currency_profit", "")),
         currency_margin=str(getattr(info, "currency_margin", "")),
+        swap_mode=int(getattr(info, "swap_mode", 0)),
+        swap_long=float(getattr(info, "swap_long", 0.0)),
+        swap_short=float(getattr(info, "swap_short", 0.0)),
+        swap_rollover3days=int(getattr(info, "swap_rollover3days", 3)),
     )
 
 

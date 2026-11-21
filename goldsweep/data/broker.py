@@ -64,6 +64,10 @@ class AccountType(StrEnum):
     REAL = "REAL"
 
 
+#: MT5 swap modes this project models (SYMBOL_SWAP_MODE_*).
+SWAP_MODE_DISABLED, SWAP_MODE_POINTS, SWAP_MODE_CURRENCY_DEPOSIT = 0, 1, 4
+
+
 @dataclass(frozen=True, slots=True)
 class SymbolSpec:
     """Instrument properties exactly as the broker reports them."""
@@ -85,6 +89,25 @@ class SymbolSpec:
     currency_base: str
     currency_profit: str
     currency_margin: str
+    #: Overnight financing as the broker states it (S4): per lot per night in
+    #: ``swap_mode`` units (MT5: 0 none, 1 points, 4 account currency); the triple
+    #: swap falls on ``swap_rollover3days`` (MT5 numbering: 0 Sunday ... 3 Wednesday).
+    swap_mode: int = 0
+    swap_long: float = 0.0
+    swap_short: float = 0.0
+    swap_rollover3days: int = 3
+
+    def swap_per_lot(self, long: bool) -> float | None:
+        """Account currency per lot per night (negative: paid), or None for a swap mode
+        this project does not model."""
+        rate = self.swap_long if long else self.swap_short
+        if self.swap_mode == SWAP_MODE_DISABLED:
+            return 0.0
+        if self.swap_mode == SWAP_MODE_POINTS:
+            return rate * self.point * self.value_per_price_unit
+        if self.swap_mode == SWAP_MODE_CURRENCY_DEPOSIT:
+            return rate
+        return None
 
     @property
     def value_per_price_unit(self) -> float:
