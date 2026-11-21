@@ -902,3 +902,36 @@ still apply, and a setup outside the kill zones gets no kill-zone points (10 of
 Whether to switch it on for the demo account is decided on evidence: the same
 real history (2026-01-01 to 2026-11-19) is backtested both ways, and the
 out-of-sample results are compared.
+
+**Result (2026-11-21): it stays off.** Exness demo feed, XAUUSDm M5, 65,163
+bars (2025-12-22 to 2026-11-20 with warm-up; no bars on 2026-04-03), the default
+settings, both runs on the same stored prices:
+
+| | Kill zones only (default) | All hours |
+|---|---|---|
+| Setups found | 48 | 137 (89 outside the kill zones) |
+| Trades at the auto-trade threshold (75) | 3: -0.34 R per trade, -45.77 USD | the same 3 trades |
+| Out-of-sample (walk-forward, 3 windows) | 1 trade, -1.01 R | the same 1 trade |
+| Stress check at the alert threshold (60) | 10 trades: +0.34 R per trade, profit factor 1.86 | 19 trades: -0.04 R per trade, profit factor 0.92 |
+| of which outside the kill zones | - | 9 trades: -0.48 R per trade, profit factor 0.30 |
+
+At the threshold the bot trades, the switch changes nothing. Only 3 of the 89
+extra setups scored 75 or more, and none became a trade: one limit entry expired,
+one was cancelled because price reached TP1 first, and one needed 80 because the
+H1 bias was neutral. With the bar lowered to 60 to get more trades, the extra
+out-of-zone trades lost on average. Every sample here is far too small to prove
+anything (the report asks for at least 30 out-of-sample trades), so this is no
+evidence for the change and weak evidence against it; the safer default stays.
+
+A wider finding: the strategy took 3 trades in this period at 75. Of the 10
+kill-zone setups that scored 75 or more, 6 expired before price reached the
+entry and 1 needed 80 because of a neutral bias. Every
+walk-forward training window had fewer than 20 trades, so the configured defaults
+were traded rather than optimised ones. A longer history (the spec's 2024-01-01
+to 2026-10-31, which needs MT5's Max bars in chart set to Unlimited) is needed
+before any setting can be judged on results.
+
+Reproduce (reports are git-ignored): `python -m goldsweep.backtest --from
+2026-01-01 --to 2026-11-19`, then the same with `--config` pointing to a copy of
+`config.yaml` with `trade_all_hours: true` and `--out` set to another folder; add
+`--threshold alert` for the stress check.
