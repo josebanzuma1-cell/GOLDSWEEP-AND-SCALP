@@ -32,6 +32,7 @@ class ZoneKind(StrEnum):
     FVG = "fvg"
     IFVG = "ifvg"
     ORDER_BLOCK = "order_block"
+    BREAKER = "breaker"  # a confluence (Unicorn), not an entry zone (D85)
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,3 +239,45 @@ def find_order_block(
                 time=candles.index[i].to_pydatetime(),
             )
     return None
+
+
+def find_breaker(
+    candles: pd.DataFrame,
+    direction: Direction,
+    *,
+    extreme_index: int,
+    earliest: int,
+    upto: int,
+) -> Zone | None:
+    """The breaker block of a sweep (Phase 9, D85).
+
+    For a long: the last up-closing candle before the drop that swept the low,
+    which price has since closed above (so the sellers it stood for failed). The
+    zone is that candle's full range, known from the bar that closed above it.
+    Shorts mirror it. ``None`` when there is no such candle, or price has not yet
+    closed through it by bar ``upto``.
+    """
+    open_, high, low, close = _arrays(candles)
+    sign = direction.sign
+    for i in range(extreme_index - 1, max(earliest, 0) - 1, -1):
+        if (close[i] - open_[i]) * sign <= 0:
+            continue
+        edge = high[i] if direction is Direction.LONG else low[i]
+        for j in range(extreme_index + 1, min(upto, len(close) - 1) + 1):
+            if (close[j] - edge) * sign > 0:
+                return Zone(
+                    kind=ZoneKind.BREAKER,
+                    direction=direction,
+                    top=float(high[i]),
+                    bottom=float(low[i]),
+                    origin_index=i,
+                    known_index=j,
+                    time=candles.index[i].to_pydatetime(),
+                )
+        return None
+    return None
+
+
+def overlaps(first: Zone, second: Zone) -> bool:
+    """True when the two price bands share some range."""
+    return first.bottom < second.top and second.bottom < first.top

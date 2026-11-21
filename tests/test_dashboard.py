@@ -21,8 +21,15 @@ from goldsweep.dashboard import charts, data
 from goldsweep.dashboard.launch import APP, URL, run_dashboard
 from goldsweep.live import HEARTBEAT_KEY, PAUSED, SNAPSHOT_KEY
 from goldsweep.storage.db import Database
-from tests.helpers import bars, utc
+from tests.helpers import bars, only_spec_model, utc
 from tests.test_paper import Harness
+
+
+@pytest.fixture
+def settings(settings: Settings) -> Settings:
+    """This module follows the spec's model end to end: the Phase 9 models are off."""
+    return only_spec_model(settings)
+
 
 END = utc(2026, 11, 17, 8, 40)
 

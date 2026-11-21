@@ -398,6 +398,8 @@ def render_html(result: BacktestResult, command: str) -> str:
         "weekday": "By weekday",
         "direction": "By direction",
         "pressure": "By buyer/seller pressure meter (did it lean with the trade?)",
+        "model": "By setup model (D85)",
+        "confluence": "By confluence tag (a trade can carry several; the tags do not score)",
     }
     for name, groups in result.breakdowns.items():
         parts.append(f"<h2>{_e(titles.get(name, name))}</h2>")

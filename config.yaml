@@ -255,4 +255,21 @@ broker:
   #   "+02:00"        fixed offset, no daylight saving
   server_timezone: auto
 
+# Setup models (Phase 9, D85). Each looks for setups on its own; their trades share
+# the risk limits above. trade: false sends a model's setups as alerts only, and
+# leaves them out of backtests. A new model trades only after its own backtest
+# supports it and the owner approves.
+models:
+  sweep_mss:      {enabled: true, trade: true}    # the spec's model
+  cisd:           {enabled: true, trade: false}   # confirmed by a CISD instead of the MSS
+  silver_bullet:  {enabled: true, trade: false}   # New York 03-04, 10-11, 14-15 only
+  continuation:   {enabled: true, trade: false}   # internal pools, with the H1 trend
+
+# Extra evidence recorded on every signal as tags (it does not change the score).
+confluence:
+  smt:                         # gold-silver divergence at the sweep
+    enabled: true
+    symbol_candidates: [XAGUSD, XAGUSD.m, XAGUSDm, SILVER]
+    lookback_bars: 24
+
 display_timezone: Africa/Kampala

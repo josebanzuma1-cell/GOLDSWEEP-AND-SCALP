@@ -2,11 +2,30 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:
+    from goldsweep.core.settings import Settings
+
+
+def only_spec_model(settings: Settings) -> Settings:
+    """``settings`` with the Phase 9 models switched off (D85), for tests that follow
+    the spec's sweep -> MSS model end to end and expect only its messages."""
+    from goldsweep.core.settings import ModelConfig
+
+    off = ModelConfig(enabled=False, trade=False)
+    models = settings.config.models.model_copy(
+        update={"cisd": off, "silver_bullet": off, "continuation": off}
+    )
+    return dataclasses.replace(
+        settings, config=settings.config.model_copy(update={"models": models})
+    )
 
 
 def utc(

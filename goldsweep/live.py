@@ -54,7 +54,8 @@ from goldsweep.analysis.refine import (
     RefineStatus,
     refine,
 )
-from goldsweep.analysis.signals import Signal, SignalEngine
+from goldsweep.analysis.signals import MODELS, Signal, SignalEngine
+from goldsweep.analysis.smt import with_smt
 from goldsweep.backtest.engine import spread_points as cost_spreads
 from goldsweep.backtest.simulator import TrailLevels
 from goldsweep.core.clock import UTC, Clock, SessionCalculator, SystemClock, ensure_utc
@@ -221,14 +222,56 @@ class Trader:
         self._state_trading = f"{prefix}.trading"
         #: Setups waiting for their M1 turn (D83), saved so a restart carries on.
         self._state_refining = f"{prefix}.refining"
+        #: The spec's model; it always runs, because the dashboard and the scenario
+        #: briefs read its pools, levels and bias (its signals count only if enabled).
         self.engine = SignalEngine.from_settings(
             settings, point=self.spec.point, symbol=self.spec.name
         )
+        #: The other setup models that are enabled (D85), each its own engine.
+        self._extra_engines = {
+            name: SignalEngine.from_settings(
+                settings, point=self.spec.point, symbol=self.spec.name, model=MODELS[name]
+            )
+            for name in MODELS
+            if name != "sweep_mss" and getattr(self._config.models, name).enabled
+        }
+        self._silver = self._resolve_silver(broker)
         saved = db.get_state(self._state_last_bar)
         self._last_bar = dt.datetime.fromisoformat(saved) if saved else None
         self._market: dict[str, Any] = {}
         self._snapshot_market: dict[str, Any] = {}
         self._last_heartbeat: dt.datetime | None = None
+
+    # -- setup models and confluence (D85) ------------------------------------------ #
+
+    def _engines(self) -> list[tuple[str, SignalEngine]]:
+        return [("sweep_mss", self.engine), *self._extra_engines.items()]
+
+    def _resolve_silver(self, broker: BrokerClient) -> str | None:
+        """The broker's silver symbol for the SMT tag, or None (the tag is then left out)."""
+        smt = self._config.confluence.smt
+        if not smt.enabled:
+            return None
+        try:
+            return broker.resolve_symbol(smt.symbol_candidates).name
+        except BrokerError as exc:
+            log.warning("no silver symbol: the SMT tag is left out", error=str(exc))
+            return None
+
+    def _with_smt(self, signals: list[Signal], trigger: pd.DataFrame) -> list[Signal]:
+        if not signals or self._silver is None:
+            return signals
+        smt = self._config.confluence.smt
+        tf = self._config.timeframes.trigger
+        try:
+            silver = self._broker.get_rates(self._silver, tf, len(trigger))
+        except BrokerError as exc:
+            log.warning("silver bars not available: the SMT tag is left out", error=str(exc))
+            return signals
+        return [
+            with_smt(s, trigger, silver, lookback_bars=smt.lookback_bars, bar=tf.duration)
+            for s in signals
+        ]
 
     # -- state ------------------------------------------------------------------ #
 
@@ -313,16 +356,21 @@ class Trader:
             )
             self._report(self.executor.on_bar(bar, trail))
 
-        # 2. The engine looks for setups that completed at this close.
-        signals = self.engine.on_bar(
-            trigger,
-            liquidity,
-            hourly,
-            spread_points=spread,
-            news_bias=score,
-            median_spread_points=median,
-            news_windows=windows,
-        )
+        # 2. Each model's engine looks for setups that completed at this close (D85).
+        signals: list[Signal] = []
+        for name, engine in self._engines():
+            found = engine.on_bar(
+                trigger,
+                liquidity,
+                hourly,
+                spread_points=spread,
+                news_bias=score,
+                median_spread_points=median,
+                news_windows=windows,
+            )
+            if getattr(self._config.models, name).enabled:
+                signals += found
+        signals = self._with_smt(signals, trigger)
         self._market = {
             "trigger": trigger,
             "liquidity": liquidity,
@@ -436,13 +484,18 @@ class Trader:
     def _numbered(self, signal: Signal) -> Signal:
         """Signal ids continue from the database, so they stay unique across restarts."""
         prefix = signal.id.rsplit("-", 1)[0]
-        (count,) = self._db.query("SELECT COUNT(*) FROM signals WHERE id LIKE ?", (f"{prefix}-%",))[
-            0
-        ]
+        # GLOB "...-LDN-[0-9]*" counts this model's ids only, not "...-LDN-CISD-01".
+        (count,) = self._db.query(
+            "SELECT COUNT(*) FROM signals WHERE id GLOB ?", (f"{prefix}-[0-9]*",)
+        )[0]
         return replace(signal, id=f"{prefix}-{int(count) + 1:02d}")
 
     def _duplicate_of(self, signal: Signal) -> str | None:
-        """Spec 7b: one trade per sweep. A restart must not trade the same raid twice."""
+        """Spec 7b: one trade per sweep. A restart must not trade the same raid twice.
+
+        Checked per model (D85): an alert-only model's signal must not stop the
+        trading model from taking the same raid.
+        """
         since = int((signal.time - DUPLICATE_WINDOW).timestamp())
         rows = self._db.query(
             "SELECT id, detail FROM signals WHERE time >= ? AND direction = ? "
@@ -451,6 +504,8 @@ class Trader:
         )
         for signal_id, detail in rows:
             data = json.loads(detail or "{}")
+            if data.get("model", "sweep_mss") != signal.model:
+                continue
             if data.get("pool") == signal.pool.label and data.get("pool_price") == round(
                 signal.pool.price, 2
             ):
@@ -505,6 +560,11 @@ class Trader:
             action, text = "alert", f"alert only: trading is {self.trading}"
         elif not execution.auto_trade:
             action, text = "alert", "alert only: auto_trade is off"
+        elif not getattr(self._config.models, signal.model).trade:
+            action, text = (
+                "alert",
+                f"alert only: the {messages.model_name(signal.model)} model does not trade yet",
+            )
         elif not signal.meets_auto_trade:
             action, text = (
                 "alert",
@@ -575,6 +635,8 @@ class Trader:
             "components": dict(signal.components),
             "take_profit_3": plan.take_profit_3,
             "mode": self.label,
+            "model": signal.model,
+            "tags": list(signal.tags),
         }
         self._db.execute(
             "INSERT OR REPLACE INTO signals (id, time, direction, session, score, entry, "

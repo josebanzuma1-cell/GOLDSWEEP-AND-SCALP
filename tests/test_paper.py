@@ -35,10 +35,17 @@ from goldsweep.execution.book import InvalidPlan, TradeBook, TradePlan
 from goldsweep.execution.executor import STATE_KEY
 from goldsweep.live import ACTIVE, PAUSED, STOPPED, NewsDesk, PaperTrader, run_paper
 from goldsweep.storage.db import Database
-from tests.helpers import bars, utc
+from tests.helpers import bars, only_spec_model, utc
 from tests.test_backtest_run import FOLLOW_UP
 from tests.test_news_sources import FakeWeb
 from tests.test_signals import MONDAY, with_raid
+
+
+@pytest.fixture
+def settings(settings: Settings) -> Settings:
+    """This module follows the spec's model end to end: the Phase 9 models are off."""
+    return only_spec_model(settings)
+
 
 START = utc(2026, 11, 17, 7, 30, 2)  # two seconds after the 07:25 bar closes
 FIVE = dt.timedelta(minutes=5)
@@ -116,6 +123,32 @@ def test_the_textbook_setup_is_traded_on_paper(settings: Settings, db: Database)
     status = h.trader.status()
     assert "Equity 10,227.51 | today 1 trade(s), +$227.51" in status
     assert "No open positions or entry orders." in status
+
+
+def test_other_models_alert_without_blocking_the_trading_model(
+    tmp_path: Path, db: Database
+) -> None:
+    from goldsweep.core.settings import DEFAULT_CONFIG_PATH, load_settings
+
+    shipped = load_settings(  # every model on, as shipped (D85)
+        DEFAULT_CONFIG_PATH,
+        read_env_file=False,
+        data_dir=tmp_path / "data",
+        log_dir=tmp_path / "logs",
+    )
+    h = Harness(shipped, db)
+    h.run_until(utc(2026, 11, 17, 7, 55))
+    traded, cisd = h.notes.sent  # the spec's model first, then the CISD model
+    assert traded.startswith("🟢 XAUUSD LONG setup (score 81.1)")
+    assert (
+        "Confluence: Unicorn (gap on a breaker), balanced price range, "
+        "Judas swing (beyond the NY midnight open)" in traded
+    )
+    assert cisd.startswith("🟡 XAUUSD LONG setup [CISD model] (score 81.1)")
+    assert "Action: alert only: the CISD model does not trade yet" in cisd
+    assert "id: 2026-11-17-LDN-CISD-01" in cisd
+    # The alert-only model did not count as a duplicate of the trading one.
+    assert [plan.id for plan in h.trader.executor.pending_orders] == ["2026-11-17-LDN-01"]
 
 
 def test_a_restart_in_the_middle_of_a_trade_resumes_it(settings: Settings, db: Database) -> None:

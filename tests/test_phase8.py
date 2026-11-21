@@ -18,10 +18,17 @@ from goldsweep.execution.book import EventKind
 from goldsweep.live import HEARTBEAT_KEY, run_live
 from goldsweep.storage.db import Database
 from goldsweep.watchdog import ALERTED_KEY, check, gold_market_open, run_watchdog
-from tests.helpers import utc
+from tests.helpers import only_spec_model, utc
 from tests.test_live_executor import Rig
 from tests.test_live_loop import LOGIN, LiveHarness, fake_terminal, live_settings
 from tests.test_paper import Harness
+
+
+@pytest.fixture
+def settings(settings: Settings) -> Settings:
+    """This module follows the spec's model end to end: the Phase 9 models are off."""
+    return only_spec_model(settings)
+
 
 # --------------------------------------------------------------------------- #
 # Unattended start: watching only until /golive <account>

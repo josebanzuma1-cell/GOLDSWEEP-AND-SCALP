@@ -31,6 +31,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -60,19 +61,29 @@ from goldsweep.analysis.structure import (
     MssEvent,
     Swing,
     displacement_atr,
+    find_cisd,
     find_mss,
     find_swings,
 )
 from goldsweep.analysis.zones import (
     Zone,
     ZoneKind,
+    find_breaker,
     find_fvgs,
     find_inversions,
     find_order_block,
     first_touch,
     ote_price,
+    overlaps,
 )
-from goldsweep.core.clock import ASIA, LONDON, NEW_YORK, OVERLAP, SessionCalculator
+from goldsweep.core.clock import (
+    ASIA,
+    LONDON,
+    NEW_YORK,
+    OVERLAP,
+    SessionCalculator,
+    ensure_utc,
+)
 from goldsweep.core.logging import get_logger
 
 if TYPE_CHECKING:
@@ -82,15 +93,56 @@ log = get_logger(__name__)
 
 #: Session name of a setup allowed only by post-news sweep mode (spec 5.6).
 POST_NEWS = "post_news"
+#: Session name of a setup of the Silver Bullet model (D85).
+SILVER_BULLET = "silver_bullet"
 _SESSION_CODES = {
     LONDON: "LDN",
     NEW_YORK: "NY",
     ASIA: "ASIA",
     OVERLAP: "OVL",
     POST_NEWS: "NEWS",
+    SILVER_BULLET: "SB",
 }
 _CRT_KINDS = frozenset({PoolKind.CRT_HIGH, PoolKind.CRT_LOW})
-_ZONE_SHARE = {ZoneKind.FVG: 1.0, ZoneKind.IFVG: 0.8, ZoneKind.ORDER_BLOCK: 0.5}
+_ZONE_SHARE = {
+    ZoneKind.FVG: 1.0,
+    ZoneKind.IFVG: 0.8,
+    ZoneKind.ORDER_BLOCK: 0.5,
+    ZoneKind.BREAKER: 0.5,
+}
+_NEW_YORK_TZ = ZoneInfo("America/New_York")
+#: ICT's Silver Bullet hours, in New York time (D85).
+SILVER_BULLET_WINDOWS = (
+    (dt.time(3), dt.time(4)),
+    (dt.time(10), dt.time(11)),
+    (dt.time(14), dt.time(15)),
+)
+
+
+def in_silver_bullet(moment: dt.datetime) -> bool:
+    """True inside one of the New York 03-04, 10-11 or 14-15 hours."""
+    local = ensure_utc(moment).astimezone(_NEW_YORK_TZ).time()
+    return any(start <= local < end for start, end in SILVER_BULLET_WINDOWS)
+
+
+@dataclass(frozen=True, slots=True)
+class ModelSpec:
+    """How a setup model differs from the spec's sweep -> MSS -> gap model (D85)."""
+
+    name: str
+    code: str  # added to signal ids; "" for the spec's model
+    confirmation: str = "mss"  # mss | cisd
+    windows: str = "kill_zones"  # kill_zones | silver_bullet
+    pools: str = "external"  # external | internal (only with the H1 trend)
+
+
+SWEEP_MSS = ModelSpec("sweep_mss", "")
+MODELS: dict[str, ModelSpec] = {
+    "sweep_mss": SWEEP_MSS,
+    "cisd": ModelSpec("cisd", "CISD", confirmation="cisd"),
+    "silver_bullet": ModelSpec("silver_bullet", "SB", windows="silver_bullet"),
+    "continuation": ModelSpec("continuation", "CONT", pools="internal"),
+}
 _SECONDARY_SESSION_SHARE = 0.6  # overlap and Asia score less than the two kill zones
 _EPSILON = 1e-9
 _ORDER_BLOCK_LOOKBACK = 5
@@ -132,6 +184,11 @@ class Signal:
     spread: float  # spread in price units when the signal formed
     expires_at: dt.datetime  # an unfilled entry order is cancelled at this time
     notes: tuple[str, ...] = ()
+    #: The setup model that found it (D85).
+    model: str = "sweep_mss"
+    #: Confluences present (unicorn, bpr, judas, silver_bullet, ote, smt); they do
+    #: not change the score, they are reported so their value can be measured.
+    tags: tuple[str, ...] = ()
 
     @property
     def pool(self) -> Pool:
@@ -190,6 +247,7 @@ class SignalEngine:
         point: float,
         symbol: str = "XAUUSD",
         window: int = 300,
+        model: ModelSpec = SWEEP_MSS,
     ) -> None:
         """Create an engine.
 
@@ -200,9 +258,11 @@ class SignalEngine:
             point: the symbol's point size, to turn a spread in points into price.
             symbol: used in signal ids and alerts only.
             window: how many trigger bars the engine looks back over.
+            model: which setup model this engine looks for (D85).
         """
         if point <= 0:
             raise ValueError("point must be positive")
+        self._model = model
         self._cfg = strategy
         self._tf = timeframes
         self._sessions = sessions
@@ -232,7 +292,12 @@ class SignalEngine:
 
     @classmethod
     def from_settings(
-        cls, settings: Settings, *, point: float, symbol: str = "XAUUSD"
+        cls,
+        settings: Settings,
+        *,
+        point: float,
+        symbol: str = "XAUUSD",
+        model: ModelSpec = SWEEP_MSS,
     ) -> SignalEngine:
         config = settings.config
         return cls(
@@ -241,7 +306,18 @@ class SignalEngine:
             SessionCalculator(config.sessions),
             point=point,
             symbol=symbol,
+            model=model,
         )
+
+    @property
+    def model(self) -> ModelSpec:
+        return self._model
+
+    @property
+    def _turn_name(self) -> str:
+        if self._model.confirmation == "cisd":
+            return "change in the state of delivery"
+        return "market-structure shift"
 
     # -- what the engine knows -------------------------------------------- #
 
@@ -396,7 +472,11 @@ class SignalEngine:
                     hours=cfg.liquidity.max_pool_age_hours
                 )
                 track.pool = pool = pool.as_swept()
-                if pool.strength < cfg.liquidity.min_sweep_pool_strength:
+                if self._model.pools == "internal":
+                    if pool.is_external:  # the continuation model raids internal pools only
+                        del self._tracks[key]
+                        continue
+                elif pool.strength < cfg.liquidity.min_sweep_pool_strength:
                     del self._tracks[key]
                     continue
                 track.stage, track.pierce_time, track.min_sweep = (
@@ -436,21 +516,11 @@ class SignalEngine:
                         now,
                         pool,
                         direction,
-                        f"no market-structure shift within {cfg.mss_window} bars",
+                        f"no {self._turn_name} within {cfg.mss_window} bars",
                     )
                     del self._tracks[key]
                     continue
-                mss = find_mss(
-                    window,
-                    atr,
-                    swings,
-                    direction,
-                    extreme_index=sweep.extreme_index,
-                    reclaim_index=sweep.reclaim_index,
-                    earliest_swing_index=earliest_swing,
-                    window=cfg.mss_window,
-                    rule=self._rule,
-                )
+                mss = self._confirm(window, atr, swings, direction, sweep, earliest_swing)
                 if mss is None:
                     continue
                 track.mss_time = mss.time
@@ -475,16 +545,13 @@ class SignalEngine:
                     del self._tracks[key]
                     continue
                 sweep = self._extended(result.event, high, low, shift)
-                mss = find_mss(
+                mss = self._confirm(
                     window.iloc[: shift + 1],
                     atr[: shift + 1],
                     swings,
                     direction,
-                    extreme_index=sweep.extreme_index,
-                    reclaim_index=sweep.reclaim_index,
-                    earliest_swing_index=earliest_swing,
-                    window=cfg.mss_window,
-                    rule=self._rule,
+                    sweep,
+                    earliest_swing,
                 )
                 later = (low if direction is Direction.LONG else high)[shift + 1 : last + 1]
                 if mss is None or ((sweep.extreme - later) * direction.sign > 0).any():
@@ -509,6 +576,39 @@ class SignalEngine:
                 found.append((key, signal))
 
         return self._one_per_raid(found)
+
+    def _confirm(
+        self,
+        window: pd.DataFrame,
+        atr: np.ndarray,
+        swings: list[Swing],
+        direction: Direction,
+        sweep: SweepEvent,
+        earliest_swing: int,
+    ) -> MssEvent | None:
+        """The turn that confirms a sweep: the MSS, or a CISD for that model (D85)."""
+        cfg = self._cfg
+        if self._model.confirmation == "cisd":
+            return find_cisd(
+                window,
+                atr,
+                direction,
+                extreme_index=sweep.extreme_index,
+                reclaim_index=sweep.reclaim_index,
+                window=cfg.mss_window,
+                rule=self._rule,
+            )
+        return find_mss(
+            window,
+            atr,
+            swings,
+            direction,
+            extreme_index=sweep.extreme_index,
+            reclaim_index=sweep.reclaim_index,
+            earliest_swing_index=earliest_swing,
+            window=cfg.mss_window,
+            rule=self._rule,
+        )
 
     # -- context: pools, levels, CRT ---------------------------------------- #
 
@@ -643,14 +743,24 @@ class SignalEngine:
         reward_2 = (take_profit_2 - entry) * sign / risk if take_profit_2 is not None else None
 
         at_open, at_close = self._sessions.status(bar_open), self._sessions.status(now)
-        session, allowed = at_open.session, at_open.allowed
-        if not allowed and not at_open.blocked and not at_close.blocked:
-            if any(start <= bar_open < end for start, end in self._news_windows):
-                session, allowed = POST_NEWS, True
-        if not allowed or at_close.blocked:
-            reasons = at_close.reasons if at_close.blocked else at_open.reasons
-            self._reject(now, pool, direction, "; ".join(reasons))
-            return None
+        if self._model.windows == "silver_bullet":
+            if at_open.blocked or at_close.blocked:
+                reasons = at_close.reasons if at_close.blocked else at_open.reasons
+                self._reject(now, pool, direction, "; ".join(reasons))
+                return None
+            if not in_silver_bullet(bar_open):
+                self._reject(now, pool, direction, "outside the Silver Bullet hours")
+                return None
+            session, allowed = SILVER_BULLET, True
+        else:
+            session, allowed = at_open.session, at_open.allowed
+            if not allowed and not at_open.blocked and not at_close.blocked:
+                if any(start <= bar_open < end for start, end in self._news_windows):
+                    session, allowed = POST_NEWS, True
+            if not allowed or at_close.blocked:
+                reasons = at_close.reasons if at_close.blocked else at_open.reasons
+                self._reject(now, pool, direction, "; ".join(reasons))
+                return None
 
         levels = self._levels
         previous_mid = levels.previous_mid if levels is not None else None
@@ -667,6 +777,9 @@ class SignalEngine:
             self._reject(
                 now, pool, direction, f"against the higher-timeframe bias ({bias.bias.value})"
             )
+            return None
+        if self._model.pools == "internal" and bias.bias is Bias.NEUTRAL:
+            self._reject(now, pool, direction, "a continuation needs an H1 trend")
             return None
 
         crt = active_crt(self._crt_setups, window, now, max_age_candles=cfg.crt.max_age_candles)
@@ -696,6 +809,7 @@ class SignalEngine:
             notes.append(crt.describe())
         if bias.bias is Bias.NEUTRAL:
             notes.append(f"bias is NEUTRAL: thresholds raised by {extra:g}")
+        tags = self._tags(window, atr, sweep, zone, now, bar_open, components)
         return Signal(
             id="",
             symbol=self._symbol,
@@ -723,7 +837,55 @@ class SignalEngine:
             spread=spread_price,
             expires_at=now + self._tf.trigger.duration * cfg.entry_expiry_bars,
             notes=tuple(notes),
+            model=self._model.name,
+            tags=tags,
         )
+
+    def _tags(
+        self,
+        window: pd.DataFrame,
+        atr: np.ndarray,
+        sweep: SweepEvent,
+        zone: Zone | None,
+        now: dt.datetime,
+        bar_open: dt.datetime,
+        components: Mapping[str, float],
+    ) -> tuple[str, ...]:
+        """Confluences of this setup (D85). Recorded and reported, never scored."""
+        direction, sign = sweep.direction, sweep.direction.sign
+        last = len(window) - 1
+        earliest = max(1, sweep.pierce_index - self._cfg.mss_structure_lookback)
+        tags: list[str] = []
+        if zone is not None and zone.kind is ZoneKind.FVG:
+            breaker = find_breaker(
+                window, direction, extreme_index=sweep.extreme_index, earliest=earliest, upto=last
+            )
+            if breaker is not None and overlaps(zone, breaker):
+                tags.append("unicorn")
+            against = find_fvgs(
+                window,
+                atr,
+                direction.opposite,
+                first=earliest,
+                last=sweep.extreme_index,
+                min_size_atr=self._cfg.fvg_min_atr,
+            )
+            if any(overlaps(zone, gap) for gap in against):
+                tags.append("bpr")
+        local = ensure_utc(now).astimezone(_NEW_YORK_TZ)
+        midnight = pd.Timestamp(
+            dt.datetime.combine(local.date(), dt.time(0), _NEW_YORK_TZ).astimezone(dt.UTC)
+        )
+        position = int(window.index.searchsorted(midnight))
+        if position < len(window) and window.index[position] == midnight:
+            midnight_open = float(window["open"].iloc[position])
+            if (midnight_open - sweep.extreme) * sign > 0:
+                tags.append("judas")  # the raid ran beyond the New York midnight open
+        if in_silver_bullet(bar_open):
+            tags.append("silver_bullet")
+        if components.get("fib", 0.0) > 0:
+            tags.append("ote")
+        return tuple(tags)
 
     def _pick_zone(
         self, window: pd.DataFrame, atr: np.ndarray, sweep: SweepEvent, mss: MssEvent, price: float
@@ -858,7 +1020,7 @@ class SignalEngine:
             bias_share = 1.0  # a setup against the bias never gets this far
         news_share = _clip(0.5 + 0.5 * sign * bias.news)
 
-        if session in (LONDON, NEW_YORK, POST_NEWS):
+        if session in (LONDON, NEW_YORK, POST_NEWS, SILVER_BULLET):
             session_share = 1.0
         elif session is not None:
             session_share = _SECONDARY_SESSION_SHARE
@@ -926,6 +1088,8 @@ class SignalEngine:
 
     def _with_id(self, signal: Signal) -> Signal:
         code = _SESSION_CODES.get(signal.session or "", "X")
+        if self._model.code:
+            code = f"{code}-{self._model.code}"  # e.g. 2026-11-17-LDN-CISD-01
         day = f"{signal.time:%Y-%m-%d}"
         number = self._counters.get((day, code), 0) + 1
         self._counters[(day, code)] = number

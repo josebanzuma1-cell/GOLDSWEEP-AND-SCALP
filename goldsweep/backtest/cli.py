@@ -162,7 +162,11 @@ def stored_data(
             for timeframe in timeframes:
                 report = download_history(broker, db, spec.name, timeframe, start, end)
                 say(f"  {report.describe()}")
+            # Silver in the same session, so MetaTrader 5 is opened once.
+            download_silver(settings, db, broker, start, end, say=say)
         trigger = db.load_candles(spec.name, trigger_tf, start=start, end=end)
+        download = False  # silver was just fetched too
+        offline = True  # nothing more to ask MetaTrader 5 in this run
     assert spec is not None
     if trigger.empty:
         raise HistoryError(
@@ -176,7 +180,85 @@ def stored_data(
         fine = None if fine.empty else fine
     source = f"MetaTrader 5 history from {db.path} ({spec.name}, {trigger_tf.value}"
     source += ", M1 for fills)" if fine is not None else ")"
-    return MarketData(spec.name, spec, trigger, fine, source)
+    silver = silver_history(
+        settings,
+        db,
+        start,
+        end,
+        download=download,
+        offline=offline,
+        broker_factory=broker_factory,
+        say=say,
+    )
+    return MarketData(spec.name, spec, trigger, fine, source, silver=silver)
+
+
+#: Where the backtester remembers which broker symbol is silver (D85), or
+#: NO_SILVER when the broker has none (so it is not asked again on every run).
+SILVER_STATE = "backtest.silver_symbol"
+NO_SILVER = "-"
+
+
+def download_silver(
+    settings: Settings,
+    db: Database,
+    broker: BrokerClient,
+    start: dt.datetime,
+    end: dt.datetime,
+    *,
+    say: Callable[[str], None],
+) -> None:
+    """Fetch silver bars for the SMT tag through an open broker session."""
+    smt = settings.config.confluence.smt
+    if not smt.enabled:
+        return
+    try:
+        silver = broker.resolve_symbol(smt.symbol_candidates)
+        db.set_state(SILVER_STATE, silver.name)
+        timeframe = settings.config.timeframes.trigger
+        report = download_history(broker, db, silver.name, timeframe, start, end)
+        say(f"  silver {report.describe()}")
+    except BrokerError as exc:
+        db.set_state(SILVER_STATE, NO_SILVER)
+        say(f"  no silver history ({exc}): the SMT tag is left out")
+
+
+def silver_history(
+    settings: Settings,
+    db: Database,
+    start: dt.datetime,
+    end: dt.datetime,
+    *,
+    download: bool,
+    offline: bool,
+    broker_factory: BrokerFactory,
+    say: Callable[[str], None],
+) -> pd.DataFrame | None:
+    """Silver bars for the SMT tag. ``None`` when the tag is off or there is no silver
+    history: the backtest goes on without the tag."""
+    smt = settings.config.confluence.smt
+    if not smt.enabled:
+        return None
+    trigger_tf = settings.config.timeframes.trigger
+    name = db.get_state(SILVER_STATE)
+    if name == NO_SILVER and not download:
+        return None
+    usable = bool(name) and name != NO_SILVER
+    frame = db.load_candles(name, trigger_tf, start=start, end=end) if usable else pd.DataFrame()
+    if not usable or not _covers(frame, start, end):
+        if offline:
+            return None if frame.empty else frame
+        try:
+            with broker_factory(settings) as broker:
+                download_silver(settings, db, broker, start, end, say=say)
+        except BrokerError as exc:
+            say(f"  MetaTrader 5 not reachable for silver ({exc}): the SMT tag is left out")
+            return None
+        name = db.get_state(SILVER_STATE)
+        if not name or name == NO_SILVER:
+            return None
+        frame = db.load_candles(name, trigger_tf, start=start, end=end)
+    return None if frame.empty else frame
 
 
 # --------------------------------------------------------------------------- #
@@ -222,7 +304,7 @@ def console_summary(result: BacktestResult, paths: dict[str, Path]) -> list[str]
         f"Signals     : {len(result.records)}{cached}" + (f" -> {detail}" if detail else "")
     )
     lines.append(f"Strategy    : {_metrics_line(result.metrics, currency)}")
-    for name in ("session", "weekday", "pressure"):
+    for name in ("session", "weekday", "pressure", "model", "confluence"):
         groups = result.breakdowns.get(name, {})
         for number, (key, metrics) in enumerate(groups.items()):
             label = f"By {name}" if number == 0 else ""

@@ -27,8 +27,15 @@ from goldsweep.live import Trader, confirm_live, run_live
 from goldsweep.storage.db import Database
 from tests.fake_mt5 import gold_symbol
 from tests.fake_mt5_trading import FakeTradingMT5
-from tests.helpers import utc
+from tests.helpers import only_spec_model, utc
 from tests.test_paper import FIVE, MARKET, START
+
+
+@pytest.fixture
+def settings(settings: Settings) -> Settings:
+    """This module follows the spec's model end to end: the Phase 9 models are off."""
+    return only_spec_model(settings)
+
 
 LOGIN = 5012345
 

@@ -189,6 +189,29 @@ def test_the_textbook_setup_becomes_one_winning_trade(
     assert [t.net_pnl for t in again.result.trades] == [trade.net_pnl]
 
 
+def test_results_by_model_and_by_confluence(settings: Settings, market: MarketData) -> None:
+    from goldsweep.backtest.engine import traded_models
+    from goldsweep.core.settings import ModelConfig
+
+    assert traded_models(settings) == ["sweep_mss"]  # the alert-only models stay out
+    result = run_backtest(
+        settings, market, TUESDAY, TUESDAY + dt.timedelta(hours=12), run_walk_forward=False
+    )
+    assert list(result.breakdowns["model"]) == ["sweep_mss"]
+    assert {"unicorn", "bpr", "judas"} <= set(result.breakdowns["confluence"])
+
+    models = settings.config.models.model_copy(update={"cisd": ModelConfig(trade=True)})
+    both = dataclasses.replace(
+        settings, config=settings.config.model_copy(update={"models": models})
+    )
+    assert traded_models(both) == ["sweep_mss", "cisd"]
+    run = run_backtest(
+        both, market, TUESDAY, TUESDAY + dt.timedelta(hours=12), run_walk_forward=False
+    )
+    assert {record.signal.model for record in run.records} == {"sweep_mss", "cisd"}
+    assert len(run.result.trades) == 1  # one raid, one position at a time
+
+
 def test_entry_lifetime_reuses_the_signals_but_the_entry_price_does_not(
     settings: Settings, market: MarketData, tmp_path: Path
 ) -> None:

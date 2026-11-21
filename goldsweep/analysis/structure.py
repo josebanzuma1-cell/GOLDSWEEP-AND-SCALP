@@ -315,6 +315,63 @@ def latest_swing(
     return None
 
 
+def find_cisd(
+    candles: pd.DataFrame,
+    atr: np.ndarray,
+    direction: Direction,
+    *,
+    extreme_index: int,
+    reclaim_index: int,
+    window: int,
+    rule: DisplacementRule,
+) -> MssEvent | None:
+    """A change in the state of delivery that confirms a sweep (Phase 9, D85).
+
+    For a long: the last run of down-closing candles that delivered price into the
+    sweep's extreme opened at some price; the first bar (no later than ``window``
+    bars after the reclaim) that closes above that opening price confirms the turn,
+    provided the leg up from the extreme contains a displacement candle. It usually
+    comes earlier than the market-structure shift. Shorts mirror it.
+
+    Returned as an :class:`MssEvent` (``level`` = the run's opening price,
+    ``swing_index`` = the run's first candle) so the rest of the engine treats both
+    confirmations alike.
+    """
+    open_ = candles["open"].to_numpy(dtype="float64")
+    high = candles["high"].to_numpy(dtype="float64")
+    low = candles["low"].to_numpy(dtype="float64")
+    close = candles["close"].to_numpy(dtype="float64")
+    against = (close < open_) if direction is Direction.LONG else (close > open_)
+    end = extreme_index
+    while end >= 0 and not against[end]:
+        end -= 1
+    if end < 0:
+        return None
+    first = end
+    while first > 0 and against[first - 1]:
+        first -= 1
+    level = float(open_[first])
+    last = min(reclaim_index + window, len(close) - 1)
+    for i in range(max(reclaim_index, extreme_index + 1), last + 1):
+        if (close[i] - level) * direction.sign <= 0:
+            continue
+        best = strongest_displacement(
+            open_, high, low, close, atr, direction, extreme_index, i, rule
+        )
+        if best is None:
+            continue
+        return MssEvent(
+            direction=direction,
+            index=i,
+            time=candles.index[i].to_pydatetime(),
+            level=level,
+            swing_index=first,
+            displacement_index=best[0],
+            displacement_atr=best[1],
+        )
+    return None
+
+
 def find_mss(
     candles: pd.DataFrame,
     atr: np.ndarray,

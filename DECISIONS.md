@@ -1155,3 +1155,74 @@ and the rule the owner asked to keep. (Fixed 3 R was the alternative for the
 highest win rate, about 45%, and the lowest drawdown, at a lower average.) The
 spec's 1.0 stays the code default; `tests/test_settings.py` lists the change. The
 acceptance backtest with this setting is in `reports/backtest_2024-01-01_2026-10-31`.
+
+### D85. More setup models and confluence tags: built, measured, alert only
+
+**What was built** (Phase 9 stage 3, from the owner's request to apply further
+strategies after research; the sources are community and ICT write-ups with no
+tested evidence, so everything was measured on this history first).
+
+- **Models**, each its own `SignalEngine(model=...)` on the same bars
+  (`analysis/signals.py::MODELS`), so a new model can never change or crowd out the
+  spec's setups; their trades share one set of risk limits:
+  - `cisd`: the spec's pipeline confirmed by a change in the state of delivery (a
+    close through the open of the last run of candles into the sweep's extreme,
+    `structure.find_cisd`) instead of the market-structure shift;
+  - `silver_bullet`: the spec's pipeline only inside the New York 03-04, 10-11 and
+    14-15 hours (zoneinfo), outside the kill zones too;
+  - `continuation`: sweeps of internal (minor) pools, only with an H1 trend.
+  Turtle Soup needs no model of its own: sweeps of swing and session pools already
+  are failed breakouts.
+- **Confluence tags** on every signal (`Signal.tags`): `unicorn` (the gap overlaps a
+  breaker block, `zones.find_breaker`), `bpr` (it overlaps an opposite gap from the
+  drop: a balanced price range), `judas` (the raid ran beyond the New York midnight
+  open), `silver_bullet` (formed in one of those hours), `ote` (the entry is in the
+  62-79% pullback), `smt` (gold swept a low or high while silver, over the same bars,
+  held its own: `analysis/smt.py`, silver = XAGUSDm on the Exness demo, 203,264 M5
+  bars stored). Alerts list them ("Confluence: ...").
+- **Deviations from the stage plan, both the safer option.** The tags do not
+  score: re-weighting the 100 points to make room would have changed which of the
+  validated setups pass 60 (D81, D84). Breaker, Unicorn and balanced price range are
+  tags, not new entry zones, for the same reason.
+- **Switches**: `config.yaml models:` (enabled / trade per model; `sweep_mss`
+  trades, the others alert only) and `confluence.smt`. In paper and live trading
+  each enabled model sends its setups; one that does not trade says so in the alert
+  ("alert only: the CISD model does not trade yet"). The duplicate check is per
+  model, so an alert-only model never stops the trading one from taking a raid.
+  Backtests generate signals only for the models that trade, each cached separately,
+  and report results by model and by tag.
+
+**Results, 2024-01-01 to 2026-10-31,** M1 fills, every model alone under today's
+settings (threshold 60, entries wait 24 bars, breakeven only at TP1):
+
+| Model | Trades | Won | Per trade | Return | Max DD | By year (R) | Without the best 3 | From 2024-07 on |
+|---|---|---|---|---|---|---|---|---|
+| **sweep + MSS (the spec's)** | **55** | **36%** | **+0.93 R** | **+26.7%** | **2.9%** | **+18.6 / +19.8 / +12.7** | **+29.8 R** | **45, +0.89 R** |
+| CISD | 120 | 23% | +0.23 R | +13.5% | 8.2% | +27.6 / +0.9 / -0.8 | -0.4 R | 99, +0.13 R |
+| Silver Bullet | 16 | 31% | +0.72 R | +5.3% | 2.5% | +2.6 / -0.7 / +9.7 | -5.5 R | 12, +0.41 R |
+| Continuation | 17 | 24% | +0.86 R | +6.8% | 4.0% | +19.8 / -0.3 / -4.9 | -10.4 R | 15, +1.13 R |
+
+The spec's model by confluence tag (55 trades, +0.93 R per trade overall; a trade
+can carry several tags):
+
+| Tag | Trades | Won | Per trade | Profit factor |
+|---|---|---|---|---|
+| unicorn | 37 | 43% | +1.22 R | 3.16 |
+| judas | 49 | 41% | +1.17 R | 2.93 |
+| ote | 11 | 36% | +1.18 R | 3.10 |
+| silver_bullet | 14 | 36% | +0.97 R | 2.51 |
+| smt | 30 | 37% | +0.79 R | 2.09 |
+| bpr | 23 | 35% | +0.71 R | 2.12 |
+
+Without the Unicorn tag the other 18 trades made +0.34 R each; without the Judas tag
+the other 6 lost -1.02 R each.
+
+**Decision: no new model trades; all stay alert only.** CISD doubles the trades but
+earned almost everything in 2024, has a drawdown nearly three times the spec's and
+nothing left without its best three. Silver Bullet and continuation found too few
+trades to judge (16 and 17) and lose without their best three. The tags do not
+change the score either. Unicorn and Judas look worth watching (the setups that
+carried them did clearly better), but these are six tags compared after the fact on
+about 50 trades: a filter chosen this way would be fitted to the past. They are
+recorded on every alert and every demo trade, so the demo account can confirm or
+refute them on new data before any of them becomes a filter.

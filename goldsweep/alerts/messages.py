@@ -25,7 +25,7 @@ from goldsweep.ai.news_bias import NewsBias
 from goldsweep.ai.scenarios import ScenarioBrief
 from goldsweep.analysis.pressure import PressureReading
 from goldsweep.analysis.refine import RefineSetup
-from goldsweep.analysis.signals import POST_NEWS, Signal
+from goldsweep.analysis.signals import POST_NEWS, SILVER_BULLET, Signal
 from goldsweep.analysis.zones import ZoneKind
 from goldsweep.core.clock import SESSION_LABELS
 from goldsweep.data.calendar import EconomicEvent
@@ -42,9 +42,31 @@ _ENTRY_SPOT = {
 }
 
 
+_MODEL_NAMES = {
+    "sweep_mss": "sweep + MSS",
+    "cisd": "CISD",
+    "silver_bullet": "Silver Bullet",
+    "continuation": "continuation",
+}
+_TAG_NAMES = {
+    "smt": "SMT (silver held)",
+    "unicorn": "Unicorn (gap on a breaker)",
+    "bpr": "balanced price range",
+    "judas": "Judas swing (beyond the NY midnight open)",
+    "silver_bullet": "Silver Bullet hour",
+    "ote": "OTE (62-79% pullback)",
+}
+
+
+def model_name(model: str) -> str:
+    return _MODEL_NAMES.get(model, model)
+
+
 def session_name(session: str | None) -> str:
     if session == POST_NEWS:
         return "post-news window"
+    if session == SILVER_BULLET:
+        return "Silver Bullet hour"
     return SESSION_LABELS.get(session or "", "outside the kill zones")
 
 
@@ -111,8 +133,9 @@ def signal_alert(
         rr2_value = abs(tp2 - plan.entry) / plan.risk_distance if tp2 is not None else None
     rr2 = f" / {rr2_value:.1f}" if rr2_value is not None else ""
     risk = f"Risk {risk_pct:g}%" + (f" ({lots:g} lots)" if lots else "")
+    model = "" if signal.model == "sweep_mss" else f" [{model_name(signal.model)} model]"
     lines = [
-        f"{icon} {signal.symbol} {signal.direction.value} setup (score {signal.score:.1f}) "
+        f"{icon} {signal.symbol} {signal.direction.value} setup{model} (score {signal.score:.1f}) "
         f"— {session_name(signal.session)}",
         f"Swept: {signal.pool.label} {signal.pool.price:.2f} → MSS confirmed (M5)",
         f"Entry: {signal.entry:.2f} ({entry_text(signal)}) | SL: {signal.stop_loss:.2f} | "
@@ -123,6 +146,8 @@ def signal_alert(
     ]
     if pressure is not None:
         lines.append(f"Pressure: {pressure.describe()}")
+    if signal.tags:
+        lines.append("Confluence: " + ", ".join(_TAG_NAMES.get(t, t) for t in signal.tags))
     lines.append(f"Action: {action}")
     lines.append(f"Mode: {mode}  |  id: {signal.id}")
     return "\n".join(lines)

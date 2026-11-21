@@ -682,6 +682,44 @@ class HousekeepingConfig(_StrictModel):
     log_days: int = Field(default=30, ge=1, le=3650)
 
 
+class ModelConfig(_StrictModel):
+    """One setup model (D85): whether it looks for setups, and whether it may trade."""
+
+    enabled: bool = True
+    #: False: its setups are sent as alerts only (and left out of backtests).
+    trade: bool = False
+
+
+class ModelsConfig(_StrictModel):
+    """Phase 9 stage 3 (D85): the setup models. Each runs as its own signal engine on
+    the same bars; their trades share one set of risk limits. A new model alerts first
+    and trades only once its own backtest supports it and the owner approves."""
+
+    #: The spec's model: sweep of external liquidity, market-structure shift, gap.
+    sweep_mss: ModelConfig = ModelConfig(trade=True)
+    #: The same, confirmed by a change in the state of delivery instead of the shift.
+    cisd: ModelConfig = ModelConfig()
+    #: The same, only inside the New York 03-04, 10-11 and 14-15 windows.
+    silver_bullet: ModelConfig = ModelConfig()
+    #: Sweeps of internal (minor) pools, only in the direction of the H1 trend.
+    continuation: ModelConfig = ModelConfig()
+
+
+class SmtConfig(_StrictModel):
+    """Gold-silver SMT divergence, reported as a confluence tag (D85)."""
+
+    enabled: bool = True
+    symbol_candidates: tuple[str, ...] = ("XAGUSD", "XAGUSD.m", "XAGUSDm", "SILVER")
+    #: Trigger bars before the sweep that set the level each metal had to break.
+    lookback_bars: int = Field(default=24, ge=3, le=500)
+
+
+class ConfluenceConfig(_StrictModel):
+    """Extra evidence recorded on every signal as tags; it does not change the score."""
+
+    smt: SmtConfig = SmtConfig()
+
+
 class AppConfig(_StrictModel):
     """Everything in config.yaml."""
 
@@ -698,6 +736,8 @@ class AppConfig(_StrictModel):
     alerts: AlertsConfig = AlertsConfig()
     housekeeping: HousekeepingConfig = HousekeepingConfig()
     broker: BrokerConfig = BrokerConfig()
+    models: ModelsConfig = ModelsConfig()
+    confluence: ConfluenceConfig = ConfluenceConfig()
     display_timezone: ZoneName = "Africa/Kampala"
 
     @model_validator(mode="after")

@@ -29,7 +29,7 @@ review after each one.
 | 6 | Live execution on a demo account, three-target split, on-chart panel | built, tested, approved |
 | 7 | Streamlit dashboard: chart, scenarios, news, trades, risk, equity, backtests, kill switch | built, tested, approved |
 | 8 | Unattended running (Task Scheduler, /golive), heartbeat, watchdog, backups, VPS guide | built, tested, approved |
-| 9 | More trades and "sniper" entries: (1) entries that fill and never wait into a blocked time, (2) M1 refinement, (3) more setup models | stages 1 and 2 done (M1 refinement left off, D83); exit rule changed to breakeven only at TP1 (D84); stage 3 next |
+| 9 | More trades and "sniper" entries: (1) entries that fill and never wait into a blocked time, (2) M1 refinement, (3) more setup models | built and tested, awaiting approval: entries wait 2 hours (D82), M1 refinement left off (D83), breakeven only at TP1 (D84), new models alert only (D85) |
 
 Only `python main.py --live` sends orders to a broker, and only after
 `MODE=LIVE` in `.env`, `mode: LIVE` in `config.yaml` and the account number typed
@@ -61,6 +61,16 @@ liquidity), on closed bars only, so a backtest and a live run see the same thing
    spec trades from 75; on the demo account `auto_trade_threshold` is set to 60
    so that enough trades happen to judge the strategy (D81). A neutral H1 bias
    adds 5 to both.
+
+**More setup models and confluence (D85).** Besides this model, three more look
+for setups on the same bars: `cisd` (confirmed by a change in the state of delivery
+instead of the shift), `silver_bullet` (only in the New York 03-04, 10-11 and 14-15
+hours) and `continuation` (sweeps of internal pools, with the H1 trend). On
+2024-2026 none of them did as well, so they send **alerts only** (`config.yaml
+models:`). Every alert also lists its confluences: Unicorn (the gap sits on a
+breaker block), balanced price range, Judas swing (the raid ran beyond the New
+York midnight open), Silver Bullet hour, OTE, and gold-silver SMT divergence. They
+are recorded, not scored, so the demo account can show which ones matter.
 
 A score measures how complete a setup is, not how likely it is to win. Every
 setup can lose; the stop-loss is what keeps that loss small. The choices made

@@ -15,6 +15,7 @@ The walk-forward test re-runs only the second pass, many times.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import hashlib
 import json
@@ -28,7 +29,8 @@ import pandas as pd
 
 from goldsweep.analysis.pressure import STRUCTURE_BARS, pressure_meter
 from goldsweep.analysis.refine import M1Refinement
-from goldsweep.analysis.signals import SignalEngine
+from goldsweep.analysis.signals import MODELS, SignalEngine
+from goldsweep.analysis.smt import with_smt
 from goldsweep.backtest.data import fingerprint
 from goldsweep.backtest.metrics import (
     WEEKDAYS,
@@ -55,6 +57,7 @@ from goldsweep.core.settings import CostConfig, Settings
 from goldsweep.core.types import Timeframe
 from goldsweep.data.broker import SymbolSpec
 from goldsweep.data.candles import aggregate_candles
+from goldsweep.execution.book import Trade
 from goldsweep.risk.risk_manager import NewsEvent
 
 log = get_logger(__name__)
@@ -78,6 +81,8 @@ class MarketData:
     fine: pd.DataFrame | None  # one-minute bars for fills, when stored
     source: str  # where the prices came from, for the report
     synthetic: bool = False
+    #: Silver bars of the trigger timeframe, for the SMT tag (D85); None when not stored.
+    silver: pd.DataFrame | None = None
 
     @property
     def fingerprint(self) -> str:
@@ -136,11 +141,26 @@ def _code_hash() -> str:
     return digest.hexdigest()[:16]
 
 
-def cache_key(settings: Settings, data: MarketData, start: dt.datetime, end: dt.datetime) -> str:
+def traded_models(settings: Settings) -> list[str]:
+    """The setup models a backtest trades: enabled and allowed to trade (D85)."""
+    models = settings.config.models
+    return [
+        name for name in MODELS if getattr(models, name).enabled and getattr(models, name).trade
+    ]
+
+
+def cache_key(
+    settings: Settings,
+    data: MarketData,
+    start: dt.datetime,
+    end: dt.datetime,
+    model: str = "sweep_mss",
+) -> str:
     """Identity of a signal pass: same key, same signals."""
     config = settings.config
     payload = {
         "format": CACHE_FORMAT,
+        "model": model,
         "data": data.fingerprint,
         "symbol": data.symbol,
         "point": data.spec.point,
@@ -170,8 +190,10 @@ def generate_signals(
     *,
     progress: Progress | None = None,
     news_bias: float = 0.0,
+    model: str = "sweep_mss",
 ) -> list[SignalRecord]:
-    """Feed every closed trigger bar to the signal engine; keep signals in ``[start, end)``."""
+    """Feed every closed trigger bar to the signal engine of ``model``; keep signals
+    in ``[start, end)``."""
     config = settings.config
     timeframes = config.timeframes
     trigger = data.trigger
@@ -182,6 +204,7 @@ def generate_signals(
         SessionCalculator(config.sessions),
         point=data.spec.point,
         symbol=data.symbol,
+        model=MODELS[model],
     )
     liquidity = aggregate_candles(trigger, timeframes.liquidity)
     hourly = aggregate_candles(trigger, timeframes.bias)
@@ -243,18 +266,19 @@ def load_or_generate_signals(
     *,
     cache_dir: Path | None,
     progress: Progress | None = None,
+    model: str = "sweep_mss",
 ) -> tuple[list[SignalRecord], bool]:
     """Signals from the cache when this exact pass ran before, else generated (and cached)."""
     path = None
     if cache_dir is not None:
-        path = cache_dir / f"signals-{cache_key(settings, data, start, end)}.pickle"
+        path = cache_dir / f"signals-{cache_key(settings, data, start, end, model)}.pickle"
         if path.exists():
             try:
                 with path.open("rb") as handle:
                     return pickle.load(handle), True  # our own file, written below
             except (OSError, pickle.UnpicklingError, EOFError, AttributeError) as exc:
                 log.warning("signal cache unreadable; regenerating", path=str(path), error=str(exc))
-    records = generate_signals(settings, data, start, end, progress=progress)
+    records = generate_signals(settings, data, start, end, progress=progress, model=model)
     if path is not None:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(".tmp")
@@ -339,6 +363,8 @@ def limitations(settings: Settings, data: MarketData, *, events: Sequence[NewsEv
             f"{config.timeframes.trigger.value} bars, assuming the worse order inside each bar. "
             "Downloading M1 history (--with-m1) makes this more precise."
         )
+    if config.confluence.smt.enabled and (data.silver is None or data.silver.empty):
+        notes.append("No silver history was stored, so the gold-silver SMT tag was not computed.")
     refinement = config.strategy.refinement
     if refinement.mode == "m1":
         if data.fine is None or data.fine.empty:
@@ -369,6 +395,52 @@ def limitations(settings: Settings, data: MarketData, *, events: Sequence[NewsEv
     return notes
 
 
+#: Confluence tags in report order (D85).
+CONFLUENCE_TAGS = ("smt", "unicorn", "bpr", "judas", "silver_bullet", "ote")
+
+
+def tag_smt(
+    settings: Settings, data: MarketData, records: Sequence[SignalRecord]
+) -> list[SignalRecord]:
+    """Add the gold-silver SMT tag where it applies (cheap, so never cached)."""
+    smt = settings.config.confluence.smt
+    if not smt.enabled or data.silver is None or data.silver.empty:
+        return list(records)
+    bar = settings.config.timeframes.trigger.duration
+    return [
+        dataclasses.replace(
+            record,
+            signal=with_smt(
+                record.signal,
+                data.trigger,
+                data.silver,
+                lookback_bars=smt.lookback_bars,
+                bar=bar,
+            ),
+        )
+        for record in records
+    ]
+
+
+def by_model(trade: Trade) -> str:
+    signal = trade.signal
+    return getattr(signal, "model", "sweep_mss") if signal is not None else "sweep_mss"
+
+
+def by_confluence(trades: Sequence[Trade], balance: float) -> dict[str, Metrics]:
+    """Results of the trades carrying each confluence tag (a trade can carry several),
+    and of those carrying none."""
+    groups: dict[str, Metrics] = {}
+    for tag in CONFLUENCE_TAGS:
+        tagged = [t for t in trades if t.signal is not None and tag in t.signal.tags]
+        if tagged:
+            groups[tag] = summarize(tagged, balance)
+    plain = [t for t in trades if t.signal is None or not t.signal.tags]
+    if plain:
+        groups["no tag"] = summarize(plain, balance)
+    return groups
+
+
 def run_backtest(
     settings: Settings,
     data: MarketData,
@@ -386,9 +458,16 @@ def run_backtest(
     start, end = ensure_utc(start), ensure_utc(end)
     if end <= start:
         raise ValueError("the backtest needs an end after its start")
-    records, cached = load_or_generate_signals(
-        settings, data, start, end, cache_dir=cache_dir, progress=progress
-    )
+    records: list[SignalRecord] = []
+    cached = True
+    for model in traded_models(settings):
+        found, reused = load_or_generate_signals(
+            settings, data, start, end, cache_dir=cache_dir, progress=progress, model=model
+        )
+        records += found
+        cached = cached and reused
+    records.sort(key=lambda record: record.time)
+    records = tag_smt(settings, data, records)
     simulator = build_simulator(settings, data, events=events)
     threshold = (
         strategy.auto_trade_threshold
@@ -414,6 +493,8 @@ def run_backtest(
             balance,
             order=["meter agreed", "meter disagreed", "meter balanced", "no reading"],
         ),
+        "model": breakdown(trades, by_model, balance, order=list(MODELS)),
+        "confluence": by_confluence(trades, balance),
     }
     wf = None
     if run_walk_forward:
