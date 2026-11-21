@@ -79,6 +79,9 @@ DASHBOARD_COMMANDS = ("pause", "resume", "stop", "status")
 #: M5 bars kept in SQLite for the dashboard chart.
 CANDLES_KEPT = 300
 DUPLICATE_WINDOW = dt.timedelta(hours=12)
+#: The news job runs every minute: waiting entries are withdrawn when a blackout
+#: begins within the next minute, so none can fill inside it.
+WITHDRAW_LEAD = dt.timedelta(minutes=1)
 MEDIAN_SPREAD_MIN_SAMPLES = 30
 EXIT_OK, EXIT_BROKER, EXIT_REFUSED, EXIT_NOT_CONFIRMED = 0, 1, 2, 3
 
@@ -441,13 +444,16 @@ class Trader:
         return None
 
     def _order_text(self, plan: TradePlan, event: BookEvent) -> str:
+        valid = f"valid until {plan.expires_at:%H:%M} UTC"
+        if plan.expiry_note:
+            valid += f" (before {plan.expiry_note})"
         if not self.live:
             if plan.entry_mode == "market":
                 return "paper market order at the next open"
-            return f"paper limit order placed, valid until {plan.expires_at:%H:%M} UTC"
+            return f"paper limit order placed, {valid}"
         text = f"sent to MT5: {event.detail}"
         if "(limit" in event.detail:
-            text += f"; valid until {plan.expires_at:%H:%M} UTC"
+            text += f"; {valid}"
         return text
 
     def _handle_signal(
@@ -459,7 +465,12 @@ class Trader:
         bias: NewsBias | None,
     ) -> PressureReading | None:
         signal = self._numbered(signal)
-        plan = TradePlan.from_signal(signal, tp3_r=self._config.risk.tp3_r)
+        blackouts = self._news.blackouts(now) if self._news else []
+        plan = TradePlan.from_signal(signal, tp3_r=self._config.risk.tp3_r).with_deadline(
+            sessions=self._sessions,
+            events=blackouts,
+            blackout_before_min=self._config.news.blackout_before_min,
+        )
         execution = self._config.execution
         traded = blocked = False
         lots: float | None = None
@@ -482,7 +493,6 @@ class Trader:
                 f"alert only: score below the auto-trade threshold {signal.auto_trade_threshold:g}",
             )
         else:
-            blackouts = self._news.blackouts(now) if self._news else []
             event = self.executor.submit(
                 plan, spread_points=spread, median_spread_points=median, events=blackouts
             )
@@ -769,6 +779,7 @@ class Trader:
             now = ensure_utc(self._clock.now())
             events = self._news.events(now)
             self._warn_before_releases(now, events)
+            self._withdraw_before_releases(now, events)
             self._protect_before_releases(now, events)
             if self._config.alerts.send_scenarios:
                 self._scenarios(now, events)
@@ -789,6 +800,23 @@ class Trader:
                 )
                 warned.append(key)
         self._db.set_state(STATE_WARNED, warned[-200:])
+
+    def _withdraw_before_releases(self, now: dt.datetime, events: Sequence[EconomicEvent]) -> None:
+        """No entry may fill in a blackout. Entries placed while a release was already
+        known expire before it (``entry_deadline``); this catches releases the calendar
+        added later: within a minute of their blackout, waiting entries are withdrawn."""
+        if not self.executor.pending_orders:
+            return
+        news = self._config.news
+        before = dt.timedelta(minutes=news.blackout_before_min)
+        after = dt.timedelta(minutes=news.blackout_after_min)
+        for event in events:
+            if is_blackout_event(event, news) and (
+                event.time - before - WITHDRAW_LEAD <= now < event.time + after
+            ):
+                detail = f"withdrawn before the news blackout for {event.currency} {event.title}"
+                self._report(self.executor.withdraw_pending(now, detail))
+                return
 
     def _protect_before_releases(self, now: dt.datetime, events: Sequence[EconomicEvent]) -> None:
         """Spec 5.6: inside a release's blackout, trades far enough up go to breakeven."""

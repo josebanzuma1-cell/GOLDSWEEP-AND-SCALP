@@ -13,6 +13,7 @@ from goldsweep.analysis.zones import (
     find_inversions,
     find_order_block,
     first_touch,
+    ote_price,
 )
 from tests.helpers import Row, bars, mirror, utc
 
@@ -108,6 +109,25 @@ def test_entry_prices_inside_a_zone() -> None:
     assert gap.price_for("fvg_bottom") == 101.0
     with pytest.raises(ValueError, match="market"):
         gap.price_for("market")
+
+
+def test_near_and_far_edges_follow_the_trade_direction() -> None:
+    (long_gap,) = gaps(BULLISH, rule=RULE)  # 101.0 .. 102.0: a pullback reaches 102.0 first
+    assert (long_gap.price_for("fvg_near"), long_gap.price_for("fvg_far")) == (102.0, 101.0)
+    (short_gap,) = gaps(mirror(BULLISH, 102.0), SHORT, rule=RULE)  # 102.0 .. 103.0
+    assert (short_gap.price_for("fvg_near"), short_gap.price_for("fvg_far")) == (102.0, 103.0)
+
+
+def test_ote_is_seventy_point_five_percent_back_and_stays_inside_the_zone() -> None:
+    (gap,) = gaps(BULLISH, rule=RULE)  # 101.0 .. 102.0
+    # Swept 100.0, ran to 105.0: 70.5% back is 105.0 - 0.705 x 5.0 = 101.475, inside.
+    assert ote_price(gap, 100.0, 105.0, 0.705) == pytest.approx(101.475)
+    assert ote_price(gap, 99.5, 104.5, 0.705) == 101.0  # 100.975 is below: the far edge
+    assert ote_price(gap, 101.5, 106.5, 0.705) == 102.0  # 102.975 is above: the near edge
+    (short_gap,) = gaps(mirror(BULLISH, 102.0), SHORT, rule=RULE)  # 102.0 .. 103.0
+    # Swept 103.5, fell to 101.0: 101.0 + 0.705 x 2.5 = 102.7625.
+    assert ote_price(short_gap, 103.5, 101.0, 0.705) == pytest.approx(102.7625)
+    assert ote_price(short_gap, 105.0, 100.0, 0.705) == 103.0  # 103.525: held at the far edge
 
 
 def test_first_touch_finds_the_bar_that_trades_back_into_the_zone() -> None:

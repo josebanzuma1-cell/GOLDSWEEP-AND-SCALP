@@ -72,6 +72,11 @@ XAUUSD-only trading assistant. The full specification is `docs/SPEC.md`
   rule functions (`plan_legs`, `breakeven_due`, `trailed_stop`). Change trade
   behaviour there, never in only one mode. A `TradePlan` without a valid SL and TP
   cannot be created, and `MT5Gateway.open` refuses an order without both; keep it so.
+- **Waiting entries never wait into a blocked time.** Every new plan goes through
+  `TradePlan.with_deadline` (`entry_deadline` in `execution/book.py`) before it is
+  submitted, in the simulator and in `live.py`, so its expiry stops before the next
+  news blackout, rollover block, Friday cutoff or weekend. `entry_expiry_bars` is not
+  part of the signal cache key: the simulator applies it (D82).
 - **Only `execution/mt5_gateway.py` sends orders.** Tests drive it with
   `tests/fake_mt5_trading.py` (a fake trade server); never send orders from tests.
   Real-terminal checks use `order_check` only, which validates without trading.

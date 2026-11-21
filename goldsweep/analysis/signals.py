@@ -70,6 +70,7 @@ from goldsweep.analysis.zones import (
     find_inversions,
     find_order_block,
     first_touch,
+    ote_price,
 )
 from goldsweep.core.clock import ASIA, LONDON, NEW_YORK, OVERLAP, SessionCalculator
 from goldsweep.core.logging import get_logger
@@ -600,6 +601,8 @@ class SignalEngine:
         price = float(close[last])
 
         zone = self._pick_zone(window, atr, sweep, mss, price)
+        leg = (high if direction is Direction.LONG else low)[sweep.extreme_index : last + 1]
+        leg_end = float(leg.max() if direction is Direction.LONG else leg.min())
         if cfg.entry_mode == "market":
             entry = price
         elif zone is None:
@@ -607,6 +610,8 @@ class SignalEngine:
                 now, pool, direction, "no usable fair value gap, inversion gap or order block"
             )
             return None
+        elif cfg.entry_mode == "ote":
+            entry = ote_price(zone, sweep.extreme, leg_end, (cfg.fib_low + cfg.fib_high) / 2.0)
         else:
             entry = zone.price_for(cfg.entry_mode)
 
@@ -669,8 +674,6 @@ class SignalEngine:
         crt_agrees = cfg.crt.enabled and (
             raided_crt_range or (crt is not None and crt.direction is direction)
         )
-        leg = (high if direction is Direction.LONG else low)[sweep.extreme_index : last + 1]
-        leg_end = float(leg.max() if direction is Direction.LONG else leg.min())
         components = self._score(
             sweep=sweep,
             mss=mss,
@@ -728,7 +731,9 @@ class SignalEngine:
         """The entry zone, by the configured priority (spec 5.5)."""
         cfg = self._cfg
         direction, sign = sweep.direction, sweep.direction.sign
-        mode = cfg.entry_mode if cfg.entry_mode != "market" else "fvg_mid"
+        # A zone is usable while price has not yet come back to its entry; ote and
+        # market entries judge that by the gap's middle.
+        mode = cfg.entry_mode if cfg.entry_mode not in ("market", "ote") else "fvg_mid"
         last = len(window) - 1
 
         def usable(zone: Zone) -> bool:

@@ -145,7 +145,9 @@ def cache_key(settings: Settings, data: MarketData, start: dt.datetime, end: dt.
         "point": data.spec.point,
         "start": ensure_utc(start).isoformat(),
         "end": ensure_utc(end).isoformat(),
-        "strategy": config.strategy.model_dump(mode="json"),
+        # How long an entry waits changes no signal, only the trading: it is applied
+        # by the simulator, so trying other expiries reuses the same signal pass.
+        "strategy": config.strategy.model_dump(mode="json", exclude={"entry_expiry_bars"}),
         "timeframes": config.timeframes.model_dump(mode="json"),
         "sessions": config.sessions.model_dump(mode="json"),
         "pressure": config.pressure.model_dump(mode="json"),
@@ -293,6 +295,8 @@ def build_simulator(
         config.strategy.liquidity.day_boundary,
         trail=trail,
         events=events,
+        sessions=SessionCalculator(config.sessions),
+        entry_lifetime=config.timeframes.trigger.duration * config.strategy.entry_expiry_bars,
     )
 
 
@@ -390,9 +394,10 @@ def run_backtest(
             config=config.backtest.walk_forward,
             start=start,
             end=end,
-            defaults=Combo(threshold, strategy.min_rr),
+            defaults=Combo(threshold, strategy.min_rr, strategy.entry_expiry_bars),
             neutral_extra=neutral_extra,
             initial_balance=balance,
+            bar=config.timeframes.trigger.duration,
         )
     settings_json = json.dumps(config.model_dump(mode="json"), sort_keys=True, default=str)
     return BacktestResult(

@@ -6,11 +6,11 @@ traded on the *test* months that follow, which it has never seen. Joining the
 test months gives an out-of-sample result: the honest estimate of how the
 choosing process performs on new data.
 
-Only parameters that select among the engine's signals are optimised (the
-auto-trade score threshold and a minimum R:R), so the signal engine runs once and
-each trial is a fast re-simulation. A large gap between in-sample and
-out-of-sample results is the classic sign of overfitting, and is reported as a
-warning.
+Only parameters that do not change the engine's signals are optimised (the
+auto-trade score threshold, a minimum R:R, and how many bars an entry order
+waits), so the signal engine runs once and each trial is a fast re-simulation. A
+large gap between in-sample and out-of-sample results is the classic sign of
+overfitting, and is reported as a warning.
 """
 
 from __future__ import annotations
@@ -42,9 +42,14 @@ class Combo:
 
     auto_trade_threshold: float
     min_rr: float
+    #: Bars an unfilled entry waits; ``None`` leaves the simulator's own setting.
+    entry_expiry_bars: int | None = None
 
     def describe(self) -> str:
-        return f"score >= {self.auto_trade_threshold:g}, R:R >= {self.min_rr:g}"
+        text = f"score >= {self.auto_trade_threshold:g}, R:R >= {self.min_rr:g}"
+        if self.entry_expiry_bars is not None:
+            text += f", entries wait {self.entry_expiry_bars} bars"
+        return text
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +81,27 @@ class WalkForwardResult:
 
 
 def grid_combos(grid: WalkForwardGrid) -> list[Combo]:
-    return [Combo(t, rr) for t, rr in product(grid.auto_trade_threshold, grid.min_rr)]
+    return [
+        Combo(t, rr, bars)
+        for t, rr, bars in product(grid.auto_trade_threshold, grid.min_rr, grid.entry_expiry_bars)
+    ]
+
+
+def _run(
+    simulator: Simulator,
+    records: Sequence[SignalRecord],
+    combo: Combo,
+    neutral_extra: float,
+    start: dt.datetime,
+    end: dt.datetime,
+    bar: dt.timedelta | None,
+) -> SimulationResult:
+    """One trial: ``combo``'s selection, and its entry lifetime when the bar length is known."""
+    select = make_selector(combo.auto_trade_threshold, combo.min_rr, neutral_extra)
+    if bar is None or combo.entry_expiry_bars is None:
+        return simulator.run(records, select=select, start=start, end=end)
+    span = bar * combo.entry_expiry_bars
+    return simulator.run(records, select=select, start=start, end=end, lifetime=lambda _r: span)
 
 
 def make_selector(threshold: float, min_rr: float, neutral_extra: float) -> Selector:
@@ -136,19 +161,21 @@ def walk_forward(
     defaults: Combo,
     neutral_extra: float,
     initial_balance: float,
+    bar: dt.timedelta | None = None,
 ) -> WalkForwardResult:
-    """Run the whole walk-forward test."""
+    """Run the whole walk-forward test.
+
+    ``bar`` is the trigger timeframe's length; with it, the grid's entry lifetimes
+    are tried too. Without it every trial keeps the simulator's own lifetime.
+    """
     grid = grid_combos(config.grid)
     folds = make_folds(start, end, config.train_months, config.test_months)
     results: list[FoldResult] = []
     for fold in folds:
         trials: list[tuple[Combo, Metrics]] = []
         for combo in grid:
-            run = simulator.run(
-                records,
-                select=make_selector(combo.auto_trade_threshold, combo.min_rr, neutral_extra),
-                start=fold.train_start,
-                end=fold.train_end,
+            run = _run(
+                simulator, records, combo, neutral_extra, fold.train_start, fold.train_end, bar
             )
             trials.append((combo, summarize(run.trades, initial_balance)))
         eligible = [
@@ -167,22 +194,20 @@ def walk_forward(
             train = next(
                 (metrics for combo, metrics in trials if combo == defaults),
                 summarize(
-                    simulator.run(
+                    _run(
+                        simulator,
                         records,
-                        select=make_selector(
-                            defaults.auto_trade_threshold, defaults.min_rr, neutral_extra
-                        ),
-                        start=fold.train_start,
-                        end=fold.train_end,
+                        defaults,
+                        neutral_extra,
+                        fold.train_start,
+                        fold.train_end,
+                        bar,
                     ).trades,
                     initial_balance,
                 ),
             )
-        test_run = simulator.run(
-            records,
-            select=make_selector(chosen.auto_trade_threshold, chosen.min_rr, neutral_extra),
-            start=fold.test_start,
-            end=fold.test_end,
+        test_run = _run(
+            simulator, records, chosen, neutral_extra, fold.test_start, fold.test_end, bar
         )
         results.append(
             FoldResult(
@@ -212,9 +237,22 @@ def walk_forward(
                     return select(record)
             return "outside the test windows"
 
-        oos = simulator.run(
-            records, select=by_fold, start=results[0].fold.test_start, end=results[-1].fold.test_end
-        )
+        oos_start, oos_end = results[0].fold.test_start, results[-1].fold.test_end
+        if bar is None or any(r.chosen.entry_expiry_bars is None for r in results):
+            oos = simulator.run(records, select=by_fold, start=oos_start, end=oos_end)
+        else:
+            step = bar
+
+            def lifetime(record: SignalRecord) -> dt.timedelta | None:
+                for result in results:
+                    fold = result.fold
+                    if fold.test_start <= record.time < fold.test_end:
+                        return step * (result.chosen.entry_expiry_bars or 0)
+                return None
+
+            oos = simulator.run(
+                records, select=by_fold, start=oos_start, end=oos_end, lifetime=lifetime
+            )
     else:
         oos = SimulationResult(final_equity=initial_balance)
     oos_metrics = summarize(oos.trades, initial_balance)

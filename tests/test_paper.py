@@ -99,7 +99,7 @@ def test_the_textbook_setup_is_traded_on_paper(settings: Settings, db: Database)
     assert alert.startswith("🟢 XAUUSD LONG setup (score 81.1) — London kill zone")
     assert "Entry: 2028.90 (FVG mid, limit) | SL: 2026.09 | TP1: 2036.00 | TP2: 2048.00" in alert
     assert "Risk 0.5% (0.17 lots)" in alert
-    assert "Action: paper limit order placed, valid until 08:25 UTC" in alert
+    assert "Action: paper limit order placed, valid until 09:55 UTC" in alert  # 24 bars
     assert "Mode: PAPER  |  id: 2026-11-17-LDN-01" in alert
     assert "Pressure: Buyers" in alert
     assert filled.startswith("✅ PAPER LONG 2026-11-17-LDN-01 filled at 2028.90, 0.17 lots")
@@ -255,13 +255,18 @@ FF_RELEASE = [
 ]
 
 
-def news_desk(settings: Settings, db: Database, clock: ManualClock) -> NewsDesk:
+def news_desk(
+    settings: Settings,
+    db: Database,
+    clock: ManualClock,
+    releases: list[dict[str, str]] = FF_RELEASE,
+) -> NewsDesk:
     from goldsweep.ai.news_analyzer import NewsAnalyzer
     from goldsweep.ai.scenarios import ScenarioBuilder
     from goldsweep.data.news import NewsService
 
     news_cfg = settings.config.news
-    web = FakeWeb({ForexFactoryProvider.URL: json.dumps(FF_RELEASE).encode()})
+    web = FakeWeb({ForexFactoryProvider.URL: json.dumps(releases).encode()})
     calendar = CalendarService(
         [(ForexFactoryProvider(fetch=web), CalendarSourceConfig(name="forexfactory"))],
         db,
@@ -288,6 +293,37 @@ def test_pre_news_warning_is_sent_once(settings: Settings, db: Database) -> None
     h.trader.news_tick()
     assert len([m for m in h.notes.sent if m.startswith("⚠️")]) == 1  # warned once
     h.clock.set(utc(2026, 11, 17, 13, 30, 2))  # too early for the next one: nothing
+
+
+#: US CPI at 08:30 UTC: its blackout starts at 08:00, when the textbook entry would fill.
+EARLY_CPI = [{**FF_RELEASE[0], "date": "2026-11-17T03:30:00-05:00"}]
+
+
+def test_an_entry_never_waits_into_a_known_blackout(settings: Settings, db: Database) -> None:
+    h = Harness(settings, db)
+    h.trader._news = news_desk(settings, db, h.clock, EARLY_CPI)  # noqa: SLF001
+    h.trader.news_tick()  # the calendar is known before the setup forms
+    h.run_until(utc(2026, 11, 17, 8, 20))
+    alert = next(m for m in h.notes.sent if m.startswith("🟢"))
+    assert "valid until 08:00 UTC (before the news blackout for USD Core CPI m/m)" in alert
+    (gone,) = [m for m in h.notes.sent if m.startswith("⌛")]
+    assert gone.endswith("entry order withdrawn before the news blackout for USD Core CPI m/m")
+    assert not [m for m in h.notes.sent if m.startswith("✅")]  # never filled
+    assert h.trader.executor.pending_orders == []
+
+
+def test_an_entry_is_withdrawn_when_a_release_appears_later(
+    settings: Settings, db: Database
+) -> None:
+    h = Harness(settings, db)
+    h.run_until(utc(2026, 11, 17, 7, 55))  # placed with no calendar: valid until 09:55
+    assert [plan.id for plan in h.trader.executor.pending_orders] == ["2026-11-17-LDN-01"]
+    h.trader._news = news_desk(settings, db, h.clock, EARLY_CPI)  # noqa: SLF001
+    h.clock.set(utc(2026, 11, 17, 7, 59, 2))  # one minute before the blackout
+    h.trader.news_tick()
+    (gone,) = [m for m in h.notes.sent if m.startswith("⌛")]
+    assert gone.endswith("entry order withdrawn before the news blackout for USD Core CPI m/m")
+    assert h.trader.executor.pending_orders == []
 
 
 def test_scenario_brief_when_the_market_is_known(settings: Settings, db: Database) -> None:

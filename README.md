@@ -29,6 +29,7 @@ review after each one.
 | 6 | Live execution on a demo account, three-target split, on-chart panel | built, tested, approved |
 | 7 | Streamlit dashboard: chart, scenarios, news, trades, risk, equity, backtests, kill switch | built, tested, approved |
 | 8 | Unattended running (Task Scheduler, /golive), heartbeat, watchdog, backups, VPS guide | built, tested, approved |
+| 9 | More trades and "sniper" entries: (1) entries that fill and never wait into a blocked time, (2) M1 refinement, (3) more setup models | stage 1 built and tested, awaiting approval |
 
 Only `python main.py --live` sends orders to a broker, and only after
 `MODE=LIVE` in `.env`, `mode: LIVE` in `config.yaml` and the account number typed
@@ -49,8 +50,11 @@ liquidity), on closed bars only, so a backtest and a live run see the same thing
 4. **Market-structure shift**: a close through the last opposing swing, carried
    by a displacement candle.
 5. **Entry**: the middle of the fair value gap the displacement left (or an
-   inversion gap, or the order block). Stop beyond the sweep's extreme,
-   targets at the next external liquidity, rejected below 2R.
+   inversion gap, or the order block), as a limit order that waits up to two
+   hours (`entry_expiry_bars: 24`, D82). Stop beyond the sweep's extreme,
+   targets at the next external liquidity, rejected below 2R. `entry_mode` can
+   also place it at the gap's near or far edge or at the optimal trade entry
+   (`ote`, 70.5% back).
 6. **Score** 0-100 from ten components. 60 or more is worth an alert. The
    spec trades from 75; on the demo account `auto_trade_threshold` is set to 60
    so that enough trades happen to judge the strategy (D81). A neutral H1 bias
@@ -246,8 +250,11 @@ What happens to a signal that clears the auto-trade threshold (spec 7b):
   TP3 (3R from the entry). Small positions use fewer parts: the broker's minimum
   is 0.01 lots per part. **Every order carries its stop-loss and take-profit when
   it is sent.**
-- A limit entry is cancelled when it expires (6 bars) or when price reaches TP1
-  first. When TP1 is hit, or price has gone 1R in favour, the other parts' stops
+- A limit entry is cancelled when it expires (`entry_expiry_bars`), when price
+  reaches TP1 first, or before any time a new trade is not allowed: a news
+  blackout, the rollover block, the Friday cutoff or the weekend. The alert says
+  so ("valid until 16:45 UTC (before the rollover block)"); paper trading and the
+  backtester follow the same rule. When TP1 is hit, or price has gone 1R in favour, the other parts' stops
   move to breakeven; after TP1 they trail behind M5 swing points. As a high-impact
   release's blackout starts, a trade 1R up moves its stop to breakeven too.
 - Every request and the broker's answer is stored in the `order_log` table;

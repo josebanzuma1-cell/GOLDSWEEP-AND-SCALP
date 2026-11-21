@@ -28,7 +28,7 @@ from goldsweep.analysis.signals import POST_NEWS, Signal
 from goldsweep.analysis.zones import ZoneKind
 from goldsweep.core.clock import SESSION_LABELS
 from goldsweep.data.calendar import EconomicEvent
-from goldsweep.execution.book import BookEvent, EventKind, ExitReason, TradePlan
+from goldsweep.execution.book import BookEvent, EventKind, ExitReason, Outcome, TradePlan
 
 _ZONE_NAMES = {ZoneKind.FVG: "FVG", ZoneKind.IFVG: "IFVG", ZoneKind.ORDER_BLOCK: "order block"}
 _ENTRY_SPOT = {"fvg_mid": "mid", "fvg_top": "top", "fvg_bottom": "bottom"}
@@ -144,6 +144,8 @@ def trade_message(event: BookEvent, mode: str) -> str | None:
             f"({trade.r_multiple:+.2f} R) | equity {event.equity or 0:,.2f}"
         )
     if event.kind in (EventKind.EXPIRED, EventKind.TP1_FIRST, EventKind.CANCELLED):
+        if event.outcome is Outcome.WITHDRAWN:
+            return f"⌛ {head}: entry order {event.detail}"  # "withdrawn before ..."
         return f"⌛ {head}: entry order withdrawn ({event.detail})"
     return None
 

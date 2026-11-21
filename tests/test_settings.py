@@ -32,6 +32,7 @@ DEFAULT_TEXT = DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")
 #: decision in DECISIONS.md; anything else that drifts from the spec fails.
 OWNER_CHANGES: dict[str, tuple[float, float]] = {
     "auto_trade_threshold": (75, 60),  # D81: demo account, to collect evidence
+    "entry_expiry_bars": (6, 24),  # D82: entries wait 2 hours (Phase 9 backtest)
 }
 
 

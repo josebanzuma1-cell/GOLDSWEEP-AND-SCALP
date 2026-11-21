@@ -29,10 +29,17 @@ backtested one.
 
 Every :class:`TradePlan` must carry a stop-loss and a take-profit on the right
 sides of the entry; a plan without them cannot even be created (ground rule 2).
+
+A waiting entry order is a trade that has not happened yet, so it must be gone
+before any time at which a new trade is forbidden: a news blackout, the rollover
+block, the Friday cutoff or the weekend. :func:`entry_deadline` cuts a plan's
+expiry to the first such moment when the plan is placed, in every mode, and the
+normal expiry path then withdraws the order (outcome ``withdrawn``).
 """
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import math
 from collections.abc import Sequence
@@ -41,15 +48,22 @@ from enum import StrEnum
 from typing import Any, Protocol
 
 from goldsweep.analysis.structure import Direction
-from goldsweep.core.clock import ensure_utc
+from goldsweep.core.clock import SessionCalculator, ensure_utc
 from goldsweep.core.settings import DayBoundaryConfig, NewsConfig, RiskConfig
 from goldsweep.data.broker import SymbolSpec
-from goldsweep.risk.risk_manager import NewsEvent, RiskManager
+from goldsweep.risk.risk_manager import HIGH_IMPACT, NewsEvent, RiskManager
 
 TARGET_NAMES = ("tp1", "tp2", "tp3")
 
 _EPSILON = 1e-9
 _EPOCH = dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
+_MINUTE = dt.timedelta(minutes=1)
+#: How the clock's hard stops are named when an entry is withdrawn before one.
+_BLOCK_NAMES = {
+    "weekend": "the weekend close",
+    "rollover block": "the rollover block",
+    "Friday cutoff": "the Friday cutoff",
+}
 
 
 def to_ns(moment: dt.datetime) -> int:
@@ -114,6 +128,9 @@ class TradePlan:
     score: float = 0.0
     risk_reward_1: float = 0.0
     take_profit_3: float | None = None
+    #: Why ``expires_at`` was brought forward (e.g. "the rollover block"); empty
+    #: when the order simply lives for its configured number of bars.
+    expiry_note: str = ""
 
     def __post_init__(self) -> None:
         numbers = [self.entry, self.stop_loss, self.take_profit_1]
@@ -138,6 +155,36 @@ class TradePlan:
     def risk_distance(self) -> float:
         """Entry to stop, in price: one R."""
         return abs(self.entry - self.stop_loss)
+
+    @property
+    def withdrawal_detail(self) -> str:
+        """What to say when the entry order is removed at ``expires_at``."""
+        if self.expiry_note:
+            return f"withdrawn before {self.expiry_note}"
+        return "the entry was not reached"
+
+    @property
+    def expiry_outcome(self) -> Outcome:
+        return Outcome.WITHDRAWN if self.expiry_note else Outcome.EXPIRED
+
+    def with_deadline(
+        self,
+        *,
+        sessions: SessionCalculator,
+        events: Sequence[NewsEvent] = (),
+        blackout_before_min: int = 0,
+    ) -> TradePlan:
+        """This plan with its expiry cut by :func:`entry_deadline` (unchanged when not cut)."""
+        deadline, note = entry_deadline(
+            self.time,
+            self.expires_at,
+            sessions=sessions,
+            events=events,
+            blackout_before_min=blackout_before_min,
+        )
+        if not note:
+            return self
+        return dataclasses.replace(self, expires_at=deadline, expiry_note=note)
 
     @classmethod
     def from_signal(cls, signal: Any, *, tp3_r: float = 0.0) -> TradePlan:
@@ -179,6 +226,7 @@ class TradePlan:
             "score": self.score,
             "risk_reward_1": self.risk_reward_1,
             "take_profit_3": self.take_profit_3,
+            "expiry_note": self.expiry_note,
         }
 
     @classmethod
@@ -193,6 +241,41 @@ class TradePlan:
 # --------------------------------------------------------------------------- #
 # The management rules, shared by the book and the live executor
 # --------------------------------------------------------------------------- #
+
+
+def entry_deadline(
+    placed: dt.datetime,
+    expires_at: dt.datetime,
+    *,
+    sessions: SessionCalculator,
+    events: Sequence[NewsEvent] = (),
+    blackout_before_min: int = 0,
+) -> tuple[dt.datetime, str]:
+    """When a waiting entry order must be gone, and why ("" when it is its own expiry).
+
+    The earliest of: the order's own expiry, the start of any known high-impact
+    news blackout, and the first minute the clock forbids new trades (rollover
+    block, Friday cutoff, weekend). Leaving a kill zone does not count: the setup
+    formed inside it. Every window is defined in whole minutes, so the clock is
+    checked minute by minute.
+    """
+    start, deadline = ensure_utc(placed), ensure_utc(expires_at)
+    note = ""
+    before = dt.timedelta(minutes=blackout_before_min)
+    for event in events:
+        if event.impact != HIGH_IMPACT:
+            continue
+        begins = ensure_utc(event.time) - before
+        if start <= begins < deadline:
+            deadline, note = begins, f"the news blackout for {event.title}"
+    moment = start.replace(second=0, microsecond=0)
+    while moment < deadline:
+        status = sessions.status(moment)
+        if status.blocked:
+            label = status.reasons[0].split(":")[0]
+            return max(moment, start), _BLOCK_NAMES.get(label, label)
+        moment += _MINUTE
+    return deadline, note
 
 
 def third_target(
@@ -329,6 +412,9 @@ class Outcome(StrEnum):
     EXPIRED = "expired"  # the entry order was not filled in time
     TP1_FIRST = "tp1_first"  # price reached TP1 before the entry filled
     CANCELLED = "cancelled"  # withdrawn (kill switch)
+    #: withdrawn unfilled before a news blackout, the rollover block, the Friday
+    #: cutoff or the weekend (see :func:`entry_deadline`)
+    WITHDRAWN = "withdrawn"
     REFUSED = "refused"  # the broker refused the order (live trading)
 
 
@@ -594,8 +680,8 @@ class TradeBook:
                     order,
                     events,
                     EventKind.EXPIRED,
-                    Outcome.EXPIRED,
-                    "the entry was not reached",
+                    plan.expiry_outcome,
+                    plan.withdrawal_detail,
                     bar.open_time,
                 )
                 continue
@@ -854,6 +940,19 @@ class TradeBook:
         for position in list(self._positions):
             price = bid if position.long else ask
             self._close_all(position, price, instant, reason, events)
+        return events
+
+    def withdraw_orders(self, when: dt.datetime, detail: str) -> list[BookEvent]:
+        """Remove every waiting entry order (a release appeared after it was placed).
+
+        Open positions are not touched.
+        """
+        events: list[BookEvent] = []
+        instant = ensure_utc(when)
+        for order in list(self._orders):
+            if order.market:
+                continue  # fills at the next open, before anything else can happen
+            self._drop(order, events, EventKind.EXPIRED, Outcome.WITHDRAWN, detail, instant)
         return events
 
     def protect_before_news(

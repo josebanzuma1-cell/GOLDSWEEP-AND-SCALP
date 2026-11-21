@@ -86,7 +86,10 @@ def _parse_clock(value: Any) -> dt.time:
 
 ClockTime = Annotated[dt.time, BeforeValidator(_parse_clock)]
 
-EntryMode = Literal["fvg_top", "fvg_mid", "fvg_bottom", "market"]
+#: Where a limit entry sits in its zone. fvg_near / fvg_far are the edge price
+#: reaches first / last (top / bottom for a long); ote is the middle of the
+#: fib_low..fib_high retracement of the move after the sweep, kept inside the zone.
+EntryMode = Literal["fvg_top", "fvg_mid", "fvg_bottom", "fvg_near", "fvg_far", "ote", "market"]
 
 
 def _upper_if_text(value: Any) -> Any:
@@ -509,8 +512,17 @@ class WalkForwardGrid(_StrictModel):
 
     auto_trade_threshold: tuple[float, ...] = (65.0, 75.0, 85.0)
     min_rr: tuple[float, ...] = (2.0, 2.5, 3.0)
+    #: How many trigger bars an unfilled entry waits (Phase 9, D82).
+    entry_expiry_bars: tuple[int, ...] = (6, 12, 24)
 
-    @field_validator("auto_trade_threshold", "min_rr")
+    @field_validator("entry_expiry_bars")
+    @classmethod
+    def _positive_bars(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        if any(bars < 1 for bars in value):
+            raise ValueError("entry_expiry_bars values must be at least 1")
+        return value
+
+    @field_validator("auto_trade_threshold", "min_rr", "entry_expiry_bars")
     @classmethod
     def _non_empty_unique(cls, value: tuple[float, ...]) -> tuple[float, ...]:
         if not value:

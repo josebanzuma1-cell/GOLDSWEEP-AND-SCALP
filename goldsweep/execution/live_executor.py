@@ -754,7 +754,7 @@ class MT5Executor(Executor):
             if group.status == PENDING and group.limit:
                 if bar.close_ns >= to_ns(plan.expires_at):
                     events += self._withdraw(
-                        group, EventKind.EXPIRED, Outcome.EXPIRED, "the entry was not reached"
+                        group, EventKind.EXPIRED, plan.expiry_outcome, plan.withdrawal_detail
                     )
                     continue
                 reached_tp1 = (
@@ -817,6 +817,14 @@ class MT5Executor(Executor):
         self.manager.order_cancelled()
         self._save()
         return [BookEvent(kind, self._now(), group.plan, None, outcome, detail)]
+
+    def withdraw_pending(self, when: dt.datetime, detail: str) -> list[BookEvent]:
+        """Withdraw unfilled limit entries. Like expiries, this waits while unarmed."""
+        events = self.sync(when)
+        for group in list(self._groups):
+            if group.status == PENDING and group.limit:
+                events += self._withdraw(group, EventKind.EXPIRED, Outcome.WITHDRAWN, detail)
+        return events
 
     def protect_before_news(
         self, when: dt.datetime, bid: float, ask: float, min_r: float, detail: str

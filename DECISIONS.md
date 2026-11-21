@@ -983,3 +983,75 @@ real-money use, the demo results are reviewed and this threshold is decided
 again. The expiry of setups before their entry is the largest leak and the next
 thing worth testing (entry price and `entry_expiry_bars`), each test being a
 10-minute replay.
+
+## Phase 9: entries that fill, sniper entries, more setup models
+
+The owner asked (2026-11-21) to fix the low trade count and to add "sniper"
+entries and further strategies, researched and applied. The phase runs in three
+stages, each ending with tests, a 2024-2026 backtest and a stop for approval:
+(1) entries that fill, (2) M1 refinement, (3) more setup models. New models will
+alert first and trade only once their own backtest supports it and the owner
+approves (the safer option; the owner skipped the question).
+
+### D82. Entries wait two hours, and never into a blocked time
+
+**Why setups expired.** Of the 110 setups scoring 60 or more in 2024-2026, 64
+expired. In 61 of the 110 price came back to the gap's near edge within 30
+minutes but not to its middle, where the order sat: the entry was well placed but
+withdrawn too early.
+
+**A waiting entry is withdrawn before any blocked time.** Before Phase 9 a
+waiting order was removed only by its expiry, by TP1 being reached first or by the
+kill switch, so it could fill inside a news blackout. Now `entry_deadline` (in
+`execution/book.py`, shared by the backtester, paper and live trading) brings a
+plan's expiry forward, when it is placed, to the first of: a known high-impact
+blackout, the rollover block, the Friday cutoff or the weekend (outcome
+`withdrawn`, and the alert says "valid until 16:45 UTC (before the rollover
+block)"). A release the calendar adds later is caught by the minute news job,
+which withdraws waiting entries a minute before its blackout. While an
+unattended start is unarmed, no cancellation is sent either (only the kill switch
+acts then), as for expiries. Leaving a kill zone does not withdraw an entry: the
+setup formed inside it.
+
+**New entry prices.** `fvg_near` / `fvg_far` (the edge a pullback reaches first /
+last, whichever the direction) and `ote` (the middle of the fib_low..fib_high
+retracement from the move's end back toward the sweep's wick, 70.5% with the
+defaults, held inside the zone). Zone choice for `ote` uses the gap's middle.
+
+**Testing variants cheaply.** How long an entry waits changes no signal, so
+`entry_expiry_bars` left the signal cache key; the simulator applies the
+configured lifetime, and the walk-forward grid now includes it (6 / 12 / 24 bars).
+The entry price does change which setups pass the R:R filter and earn fib points,
+so each entry mode still needs its own replay (planned as cheap, found not to be).
+
+**Results, 2024-01-01 to 2026-10-31,** threshold 60, everything else default:
+
+| Entry | Waits | Trades | Per trade | Profit factor | Return | Max DD | From 2024-07 on |
+|---|---|---|---|---|---|---|---|
+| gap middle | 6 bars (before) | 31 | +0.40 R | 1.96 | +5.9% | 2.6% | 27 trades, +0.38 R |
+| gap middle | 12 bars | 44 | +0.27 R | 1.65 | +5.9% | 3.4% | 38, +0.28 R |
+| **gap middle** | **24 bars** | **54** | **+0.52 R** | **2.23** | **+14.4%** | **2.5%** | **44, +0.38 R** |
+| near edge | 6 / 12 / 24 | 36 / 45 / 51 | +0.34 / +0.27 / +0.42 R | 1.71 / 1.49 / 1.86 | +5.7 / +4.9 / +9.9% | 3.3 / 4.3 / 2.5% | 32 / 39 / 43 trades, +0.28 / +0.26 / +0.36 R |
+| OTE | 6 / 12 / 24 | 29 / 42 / 57 | +0.26 / -0.02 / +0.36 R | 1.47 / 0.92 / 1.67 | +3.5 / -0.9 / +9.9% | 3.4 / 5.9 / 4.4% | 24 / 35 / 47 trades, +0.26 / -0.03 / +0.27 R |
+
+**Decision:** keep the gap's middle and let it wait 24 bars (2 hours):
+`entry_expiry_bars: 24`. It nearly doubles the trades and did at least as well as
+before on every measure shown. Read with care:
+
+- 12 bars did worse than both 6 and 24, which says how noisy samples of 30-60
+  trades are; the ranking is partly chance.
+- The walk-forward still never optimised (every window had fewer than 20 trades),
+  so "from 2024-07 on" is the same fixed setting on later months, and 24 was
+  chosen after looking at the whole period: a mild fit to the past.
+- The result leans on a few big winners: the 3 best trades carry about 19.5 of the
+  28 R. By year: 2024 +19.2 R (22 trades), 2025 +8.5 R (15), 2026 +0.3 R (17).
+  About one trade in five wins; the average win is +4.2 R, the average loss -0.54 R
+  (many losers leave at breakeven), and the longest losing run was 12 trades.
+- No historical calendar is stored, so news blackouts were not part of these
+  backtests; live and paper trading apply them (and now withdraw entries before
+  them).
+- A waiting entry holds the one position slot for up to 2 hours, so it can block
+  a later setup; the backtest includes that.
+
+The spec's 6 bars stays the code default; `tests/test_settings.py` lists this as a
+recorded change.

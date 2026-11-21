@@ -56,15 +56,41 @@ class Zone:
     def size(self) -> float:
         return self.top - self.bottom
 
+    @property
+    def near(self) -> float:
+        """The edge a pullback reaches first: the top for a long, the bottom for a short."""
+        return self.top if self.direction is Direction.LONG else self.bottom
+
+    @property
+    def far(self) -> float:
+        """The edge a pullback reaches last (the deepest entry inside the zone)."""
+        return self.bottom if self.direction is Direction.LONG else self.top
+
     def price_for(self, entry_mode: str) -> float:
-        """Entry price inside the zone for ``fvg_top`` / ``fvg_mid`` / ``fvg_bottom``."""
+        """Entry price inside the zone for ``fvg_top`` / ``fvg_mid`` / ``fvg_bottom`` /
+        ``fvg_near`` / ``fvg_far``. (``ote`` needs the swing: see :func:`ote_price`.)"""
         if entry_mode == "fvg_top":
             return self.top
         if entry_mode == "fvg_bottom":
             return self.bottom
         if entry_mode == "fvg_mid":
             return self.mid
+        if entry_mode == "fvg_near":
+            return self.near
+        if entry_mode == "fvg_far":
+            return self.far
         raise ValueError(f"entry mode {entry_mode!r} does not name a price inside a zone")
+
+
+def ote_price(zone: Zone, extreme: float, leg_end: float, level: float) -> float:
+    """The optimal-trade-entry price: ``level`` of the way back from ``leg_end`` toward
+    ``extreme`` (the sweep's wick), kept inside ``zone``.
+
+    For a long that swept a low at 2020 and rallied to 2030, level 0.705 gives
+    2030 - 0.705 x 10 = 2022.95, then clamped to the zone's bottom..top.
+    """
+    price = leg_end - level * (leg_end - extreme)
+    return min(max(price, zone.bottom), zone.top)
 
 
 def _arrays(candles: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:

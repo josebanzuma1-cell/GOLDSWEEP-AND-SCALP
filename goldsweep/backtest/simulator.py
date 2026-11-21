@@ -39,6 +39,7 @@ confirmed M5 swing points (optional). As a high-impact blackout starts, a trade
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import math
 from collections.abc import Callable, Sequence
@@ -49,7 +50,7 @@ import numpy as np
 import pandas as pd
 
 from goldsweep.analysis.structure import swing_indices
-from goldsweep.core.clock import ensure_utc
+from goldsweep.core.clock import SessionCalculator, ensure_utc
 from goldsweep.core.types import Timeframe
 from goldsweep.execution.book import (
     Bar,
@@ -253,7 +254,16 @@ class Simulator:
         *,
         trail: TrailLevels | None = None,
         events: Sequence[NewsEvent] = (),
+        sessions: SessionCalculator | None = None,
+        entry_lifetime: dt.timedelta | None = None,
     ) -> None:
+        """``sessions``: when given, a waiting entry is withdrawn before the next news
+        blackout, rollover block, Friday cutoff or weekend (``entry_deadline``), as in
+        paper and live trading.
+
+        ``entry_lifetime``: how long a limit entry waits, measured from the signal
+        (``entry_expiry_bars`` x the trigger bar). ``None`` keeps each signal's own
+        ``expires_at``; cached signals may have been made under another setting."""
         self._series = series
         self._spec = spec
         self._risk_cfg = risk
@@ -262,6 +272,8 @@ class Simulator:
         self._boundary = boundary
         self._trail = trail if backtest.trail_after_tp1 else None
         self._events = tuple(events)
+        self._sessions = sessions
+        self._lifetime = entry_lifetime
         # Spec 5.6: where each high-impact blackout starts, open trades that are
         # far enough in profit move their stop to breakeven.
         before = dt.timedelta(minutes=news.blackout_before_min)
@@ -289,10 +301,12 @@ class Simulator:
         select: Callable[[SignalRecord], str | None],
         start: dt.datetime,
         end: dt.datetime,
+        lifetime: Callable[[SignalRecord], dt.timedelta | None] | None = None,
     ) -> SimulationResult:
         """Trade the signals in ``[start, end)`` that ``select`` accepts.
 
         ``select`` returns ``None`` to trade a signal, or the reason it is passed over.
+        ``lifetime`` overrides the entry lifetime per signal (the walk-forward's trials).
         Trades opened in the window are followed to their exit even past ``end``.
         """
         costs = self._cfg.costs
@@ -337,8 +351,18 @@ class Simulator:
                 if passed_over is not None:
                     result.outcomes.append(SignalOutcome(record, Outcome.NOT_SELECTED, passed_over))
                     continue
+                plan = TradePlan.from_signal(record.signal, tp3_r=self._risk_cfg.tp3_r)
+                span = lifetime(record) if lifetime is not None else self._lifetime
+                if span is not None and plan.entry_mode != "market":
+                    plan = dataclasses.replace(plan, expires_at=plan.time + span)
+                if self._sessions is not None:
+                    plan = plan.with_deadline(
+                        sessions=self._sessions,
+                        events=self._events,
+                        blackout_before_min=self._news.blackout_before_min,
+                    )
                 event = book.submit(
-                    TradePlan.from_signal(record.signal, tp3_r=self._risk_cfg.tp3_r),
+                    plan,
                     record,
                     spread_points=record.spread_points,
                     median_spread_points=record.median_spread_points,

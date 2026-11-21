@@ -189,6 +189,30 @@ def test_the_textbook_setup_becomes_one_winning_trade(
     assert [t.net_pnl for t in again.result.trades] == [trade.net_pnl]
 
 
+def test_entry_lifetime_reuses_the_signals_but_the_entry_price_does_not(
+    settings: Settings, market: MarketData, tmp_path: Path
+) -> None:
+    cache = tmp_path / "cache"
+
+    def run(**strategy: object):  # noqa: ANN202
+        config = settings.config.model_copy(
+            update={"strategy": settings.config.strategy.model_copy(update=strategy)}
+        )
+        return run_backtest(
+            dataclasses.replace(settings, config=config),
+            market,
+            TUESDAY,
+            TUESDAY + dt.timedelta(hours=12),
+            run_walk_forward=False,
+            cache_dir=cache,
+        )
+
+    assert not run().signals_cached
+    longer = run(entry_expiry_bars=24)  # how long an entry waits changes no signal
+    assert longer.signals_cached and len(longer.result.trades) == 1
+    assert not run(entry_mode="fvg_far").signals_cached  # the entry price does
+
+
 def test_report_files_are_written_and_reproducible(
     settings: Settings, market: MarketData, tmp_path: Path
 ) -> None:

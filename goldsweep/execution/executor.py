@@ -97,6 +97,13 @@ class Executor(ABC):
     ) -> list[BookEvent]:
         """The kill switch: cancel every order and close every position."""
 
+    @abstractmethod
+    def withdraw_pending(self, when: dt.datetime, detail: str) -> list[BookEvent]:
+        """Withdraw every unfilled entry order (a news blackout is about to start).
+
+        Open positions are not touched.
+        """
+
     @property
     @abstractmethod
     def equity(self) -> float: ...
@@ -222,6 +229,12 @@ class PaperExecutor(Executor):
     ) -> list[BookEvent]:
         events = self._book.close_everything(when, bid, ask, ExitReason.MANUAL, detail)
         self._save(events)
+        return events
+
+    def withdraw_pending(self, when: dt.datetime, detail: str) -> list[BookEvent]:
+        events = self._book.withdraw_orders(when, detail)
+        if events:
+            self._save(events)
         return events
 
     def protect_before_news(

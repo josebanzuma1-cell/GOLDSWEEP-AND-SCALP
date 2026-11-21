@@ -30,12 +30,14 @@ from goldsweep.backtest.simulator import (
     TrailLevels,
     combine_series,
 )
+from goldsweep.core.clock import SessionCalculator
 from goldsweep.core.settings import (
     BacktestConfig,
     CostConfig,
     DayBoundaryConfig,
     NewsConfig,
     RiskConfig,
+    SessionsConfig,
 )
 from goldsweep.core.types import Timeframe
 from goldsweep.data.mock_broker import default_gold_spec
@@ -100,13 +102,16 @@ def simulate(
     trail: int | None = None,
     select: object = None,
     events: Sequence[NewsEvent] = (),
+    signal_time: dt.datetime = SIGNAL_TIME,
+    sessions: SessionCalculator | None = None,
+    entry_lifetime: dt.timedelta | None = None,
 ) -> SimulationResult:
-    """Bars from the signal bar (closing at SIGNAL_TIME) on, then one run.
+    """Bars from the signal bar (closing at ``signal_time``) on, then one run.
 
     The default risk settings have no TP3 (the two-target split of spec 6); the
     three-way split of spec 7b has its own tests below.
     """
-    frame = bars(rows, SIGNAL_TIME - BAR)
+    frame = bars(rows, signal_time - BAR)
     series = PriceSeries.from_candles(frame, Timeframe.M5, point=GOLD.point)
     levels = TrailLevels.from_candles(frame, Timeframe.M5, trail) if trail else None
     simulator = Simulator(
@@ -118,6 +123,8 @@ def simulate(
         DayBoundaryConfig(),
         trail=levels,
         events=events,
+        sessions=sessions,
+        entry_lifetime=entry_lifetime,
     )
     return simulator.run(
         [record(signal) for signal in signals],
@@ -309,11 +316,64 @@ def test_entry_order_expires_after_six_bars(base_signal: Signal) -> None:
     assert outcome.outcome is Outcome.EXPIRED
 
 
+def test_the_configured_entry_lifetime_replaces_the_signals_own(base_signal: Signal) -> None:
+    rows = [QUIET] + [NO_FILL] * 7 + [FILL, TO_TP1]  # the dip comes 40 minutes after the signal
+    assert simulate(rows, [make_signal(base_signal)]).trades == []  # 6 bars: expired at 08:25
+    longer = simulate(rows, [make_signal(base_signal)], entry_lifetime=12 * BAR)
+    assert only_trade(longer).fill_time == SIGNAL_TIME + 7 * BAR
+    shorter = simulate([QUIET, NO_FILL, FILL], [make_signal(base_signal)], entry_lifetime=BAR)
+    assert [o.outcome for o in shorter.outcomes] == [Outcome.EXPIRED]
+
+
 def test_order_cancelled_when_tp1_comes_first(base_signal: Signal) -> None:
     runaway: Row = (2030.0, 2033.5, 2029.9, 2033.2)
     result = simulate([QUIET, runaway, FILL], [make_signal(base_signal)])
     assert result.trades == []
     assert result.outcomes[0].outcome is Outcome.TP1_FIRST
+
+
+#: Tuesday 16:35 New York time (EST): the rollover block starts ten minutes later.
+BEFORE_ROLLOVER = dt.datetime(2026, 11, 17, 21, 35, tzinfo=dt.UTC)
+SPEC_SESSIONS = SessionCalculator(SessionsConfig())
+
+
+def test_entry_order_withdrawn_before_the_rollover_block(base_signal: Signal) -> None:
+    signal = make_signal(base_signal, time=BEFORE_ROLLOVER)
+    rows = [QUIET, NO_FILL, NO_FILL, FILL, TO_TP1]  # the fill bar opens at 21:45, in the block
+    result = simulate(rows, [signal], signal_time=BEFORE_ROLLOVER, sessions=SPEC_SESSIONS)
+    assert result.trades == []
+    (outcome,) = result.outcomes
+    assert (outcome.outcome, outcome.reason) == (
+        Outcome.WITHDRAWN,
+        "withdrawn before the rollover block",
+    )
+    # Without the clock rule the same order would have filled inside the block.
+    assert simulate(rows, [signal], signal_time=BEFORE_ROLLOVER).trades
+
+
+def test_an_entry_filled_before_the_block_is_kept(base_signal: Signal) -> None:
+    signal = make_signal(base_signal, time=BEFORE_ROLLOVER)
+    result = simulate(
+        [QUIET, FILL, TO_1R, TO_TP1, TO_TP2],
+        [signal],
+        signal_time=BEFORE_ROLLOVER,
+        sessions=SPEC_SESSIONS,
+    )
+    assert only_trade(result).fill_time == BEFORE_ROLLOVER  # managed through the block
+
+
+def test_entry_order_withdrawn_before_a_news_blackout(base_signal: Signal) -> None:
+    cpi = NewsEvent(SIGNAL_TIME + dt.timedelta(minutes=40), "US CPI")  # blackout from 08:05
+    result = simulate(
+        [QUIET, NO_FILL, NO_FILL, FILL, TO_TP1],
+        [make_signal(base_signal)],
+        events=[cpi],
+        sessions=SPEC_SESSIONS,
+    )
+    assert result.trades == []
+    assert [(o.outcome, o.reason) for o in result.outcomes] == [
+        (Outcome.WITHDRAWN, "withdrawn before the news blackout for US CPI")
+    ]
 
 
 def test_market_entry_fills_at_the_next_open_with_spread_and_slippage(

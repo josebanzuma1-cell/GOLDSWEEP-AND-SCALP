@@ -91,7 +91,7 @@ def test_a_signal_becomes_real_orders_with_stops(
     assert "Mode: LIVE DEMO  |  id: 2026-11-17-LDN-01" in alert
     assert (
         "Action: sent to MT5: 0.17 lots in 2 position(s) (limit 2028.90), 47.75 at risk; "
-        "valid until 08:25 UTC" in alert
+        "valid until 09:55 UTC" in alert  # entries wait 24 bars (D82)
     )
     orders = sorted(h.fake.pending_orders.values(), key=lambda o: o.ticket)
     assert [(o.volume_current, o.price_open, o.sl, o.tp) for o in orders] == [

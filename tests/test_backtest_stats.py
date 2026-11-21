@@ -196,9 +196,17 @@ def test_selector_needs_the_score_and_the_rr(base_signal: Signal) -> None:
 
 
 def test_grid_combinations() -> None:
-    combos = grid_combos(WalkForwardGrid(auto_trade_threshold=(85, 65), min_rr=(2.0,)))
-    assert combos == [Combo(65.0, 2.0), Combo(85.0, 2.0)]  # sorted by the config model
-    assert combos[0].describe() == "score >= 65, R:R >= 2"
+    combos = grid_combos(
+        WalkForwardGrid(auto_trade_threshold=(85, 65), min_rr=(2.0,), entry_expiry_bars=(12, 6))
+    )
+    assert combos == [  # sorted by the config model
+        Combo(65.0, 2.0, 6),
+        Combo(65.0, 2.0, 12),
+        Combo(85.0, 2.0, 6),
+        Combo(85.0, 2.0, 12),
+    ]
+    assert combos[0].describe() == "score >= 65, R:R >= 2, entries wait 6 bars"
+    assert Combo(75.0, 2.0).describe() == "score >= 75, R:R >= 2"  # lifetime left alone
 
 
 class StubSimulator:
@@ -232,7 +240,8 @@ def test_walk_forward_picks_the_threshold_that_works(base_signal: Signal) -> Non
             base_signal, 2.0 if score > 80 else -1.0, when=when, number=week
         )
     config = WalkForwardConfig(
-        min_train_trades=5, grid=WalkForwardGrid(auto_trade_threshold=(65, 85), min_rr=(2.0,))
+        min_train_trades=5,
+        grid=WalkForwardGrid(auto_trade_threshold=(65, 85), min_rr=(2.0,), entry_expiry_bars=(6,)),
     )
     result = walk_forward(
         StubSimulator(outcomes),  # type: ignore[arg-type]
@@ -245,12 +254,58 @@ def test_walk_forward_picks_the_threshold_that_works(base_signal: Signal) -> Non
         initial_balance=10_000.0,
     )
     assert len(result.folds) == 3
-    assert {fold.chosen for fold in result.folds} == {Combo(85.0, 2.0)}
+    assert {fold.chosen for fold in result.folds} == {Combo(85.0, 2.0, 6)}
     assert all(fold.eligible == 2 for fold in result.folds)
     assert result.oos_metrics.trades == len(result.out_of_sample.trades)
     assert result.oos_metrics.expectancy_r == pytest.approx(2.0)  # only the winners traded
     assert result.in_sample_expectancy_r == pytest.approx(2.0)
     assert any("too few to tell skill from luck" in w for w in result.warnings)
+
+
+class LifetimeStub(StubSimulator):
+    """Also notes the entry lifetimes the walk-forward asks the simulator to use."""
+
+    def __init__(self, outcomes: dict[str, Trade]) -> None:
+        super().__init__(outcomes)
+        self.lifetimes: set[dt.timedelta | None] = set()
+
+    def run(self, records, *, select, start, end, lifetime=None):  # noqa: ANN001, ANN201
+        if lifetime is not None:
+            self.lifetimes.update(lifetime(r) for r in records if start <= r.time < end)
+        return super().run(records, select=select, start=start, end=end)
+
+
+def test_walk_forward_tries_each_entry_lifetime(base_signal: Signal) -> None:
+    records, outcomes = [], {}
+    for week in range(52):
+        when = utc(2024, 1, 2, 8) + dt.timedelta(weeks=week)
+        signal = dataclasses.replace(
+            make_signal(base_signal, time=when, number=week),
+            score=90.0,
+            bias=dataclasses.replace(base_signal.bias, bias=Bias.LONG),
+        )
+        records.append(record(signal))
+        outcomes[signal.id] = trade(base_signal, 2.0, when=when, number=week)
+    stub = LifetimeStub(outcomes)
+    result = walk_forward(
+        stub,  # type: ignore[arg-type]
+        records,
+        config=WalkForwardConfig(
+            min_train_trades=5,
+            grid=WalkForwardGrid(
+                auto_trade_threshold=(65,), min_rr=(2.0,), entry_expiry_bars=(6, 24)
+            ),
+        ),
+        start=utc(2024, 1, 1),
+        end=utc(2025, 1, 1),
+        defaults=Combo(65.0, 2.0, 6),
+        neutral_extra=5.0,
+        initial_balance=10_000.0,
+        bar=dt.timedelta(minutes=5),
+    )
+    assert stub.lifetimes == {dt.timedelta(minutes=30), dt.timedelta(hours=2)}
+    assert {fold.chosen.entry_expiry_bars for fold in result.folds} <= {6, 24}
+    assert "entries wait" in result.folds[0].chosen.describe()
 
 
 def test_walk_forward_falls_back_to_defaults_without_enough_trades(base_signal: Signal) -> None:

@@ -189,6 +189,46 @@ def test_limit_entry_fills_or_expires(settings: Settings, db: Database) -> None:
     rig.db.close()
 
 
+def test_limit_entry_withdrawn_at_its_cut_deadline(settings: Settings, db: Database) -> None:
+    rig = Rig(settings, db)
+    rig.submit(
+        plan(
+            entry_mode="fvg_mid",
+            entry=2648.0,
+            stop_loss=2643.0,
+            expires_at=utc(2026, 11, 18, 8, 10),
+            expiry_note="the news blackout for US CPI",
+        )
+    )
+    bar = rig.bar(utc(2026, 11, 18, 8, 5), 2650.0, 2651.0, 2649.0, 2650.5)  # closes 08:10
+    (gone,) = rig.executor.on_bar(bar)
+    assert (gone.kind, gone.outcome, gone.detail) == (
+        EventKind.EXPIRED,
+        Outcome.WITHDRAWN,
+        "withdrawn before the news blackout for US CPI",
+    )
+    assert rig.fake.pending_orders == {} and rig.executor.manager.open_positions == 0
+
+
+def test_withdraw_pending_cancels_only_unfilled_entries(settings: Settings, db: Database) -> None:
+    rig = Rig(settings, db)
+    rig.submit(plan(entry_mode="fvg_mid", entry=2648.0, stop_loss=2643.0))
+    rig.executor.armed = False  # an unattended start before /golive: nothing is sent
+    assert rig.executor.withdraw_pending(NOW, "withdrawn before the news blackout") == []
+    assert len(rig.fake.pending_orders) == 3
+    rig.executor.armed = True
+    (gone,) = rig.executor.withdraw_pending(NOW, "withdrawn before the news blackout")
+    assert (gone.kind, gone.outcome) == (EventKind.EXPIRED, Outcome.WITHDRAWN)
+    assert rig.fake.pending_orders == {} and rig.executor.pending_orders == []
+
+    rig = Rig(settings, Database(":memory:"))
+    rig.submit()  # a market trade: open positions are never touched
+    rig.executor.sync()
+    assert rig.executor.withdraw_pending(NOW, "withdrawn before the news blackout") == []
+    assert len(rig.positions()) == 3
+    rig.db.close()
+
+
 def test_limit_entry_withdrawn_when_tp1_comes_first(settings: Settings, db: Database) -> None:
     rig = Rig(settings, db)
     rig.submit(plan(entry_mode="fvg_mid", entry=2648.0, stop_loss=2643.0))

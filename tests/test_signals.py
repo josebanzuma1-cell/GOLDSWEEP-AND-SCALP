@@ -196,7 +196,7 @@ def test_raid_of_the_asian_low_becomes_a_long_signal(settings: Settings) -> None
     assert signal.risk_reward_2 == pytest.approx((2048.0 - signal.entry) / signal.risk)
 
     assert signal.bias.bias is Bias.LONG
-    assert signal.expires_at == SIGNAL_TIME + 6 * BAR
+    assert signal.expires_at == SIGNAL_TIME + 24 * BAR  # entries wait 2 hours (D82)
     assert any("swept Asian low" in note for note in signal.notes)
     assert any("CRT range extreme" in note for note in signal.notes)
 
@@ -457,6 +457,22 @@ def test_entry_at_the_edge_of_the_gap(settings: Settings) -> None:
     top = only_signal(feed(top_engine, with_raid()))
     bottom = only_signal(feed(engine_for(settings, entry_mode="fvg_bottom"), with_raid()))
     assert (top.entry, bottom.entry) == (2029.9, 2027.9)
+    # For a long the near edge is the top and the far edge the bottom.
+    near = only_signal(feed(engine_for(settings, entry_mode="fvg_near", min_rr=1.5), with_raid()))
+    far = only_signal(feed(engine_for(settings, entry_mode="fvg_far"), with_raid()))
+    assert (near.entry, far.entry) == (2029.9, 2027.9)
+    assert near.entry_mode == "fvg_near"
+
+
+def test_optimal_trade_entry(settings: Settings) -> None:
+    # 70.5% back from the high after the sweep toward the 2026.4 wick lies below the
+    # gap (2027.9 .. 2029.9), so the entry is held at the gap's far edge; that price is
+    # inside the 62-79% fib zone, which earns the fib points the middle did not.
+    signal = only_signal(feed(engine_for(settings, entry_mode="ote"), with_raid()))
+    assert signal.entry_mode == "ote"
+    assert signal.entry == 2027.9
+    assert signal.components["fib"] == 5.0
+    assert signal.risk_reward_1 == pytest.approx((2036.0 - 2027.9) / signal.risk)
 
 
 def test_wide_spread_moves_the_stop_and_costs_points(settings: Settings) -> None:
