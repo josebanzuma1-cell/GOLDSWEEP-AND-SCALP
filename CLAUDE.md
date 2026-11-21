@@ -4,6 +4,12 @@ XAUUSD-only trading assistant. The full specification is `docs/SPEC.md`
 (the owner's build prompt, verbatim). Choices made where it was open are in
 `DECISIONS.md`. The phase table in `README.md` shows what exists.
 
+The scalper add-on (phases S0-S6) is specified in `docs/SCALPER_SPEC.md` (verbatim)
+and planned in `docs/SCALPER_PLAN.md`; where the two differ, the plan and D88-D99
+apply (the prompt assumes a "section 7c" and files that never existed here). It runs
+alongside the main strategy, never instead of it. Never copy the third-party product
+it shows (name, mascot, logo, artwork); the `reference/` folder stays out of git.
+
 ## How the work is organised
 
 - Build one phase of `docs/SPEC.md` section 9 at a time. At the end of a phase:

@@ -1382,3 +1382,138 @@ owner is asked.
 
 **Decision:** London and New York keep trading their current rule and monitor the
 Judas candidate; Asia alerts only. No candidate trades without `/approve`.
+
+## Scalper add-on (phases S0-S6)
+
+The owner's prompt (2026-11-21) is `docs/SCALPER_SPEC.md`; the owner added "add this
+alongside the trade system". The S0 review and plan is `docs/SCALPER_PLAN.md`. The
+decisions below are S0's: where the prompt conflicts with the project as built, or
+leaves something open, the safer option is taken. D89 needs the owner's choice.
+
+### D88. Alongside, in the same bot, with its own identity at the broker
+
+The scalper runs next to the sweep + MSS strategy, inside the same bot process: one
+MT5 connection, one lock (the MT5 Python API is not thread-safe), one kill switch,
+one `/golive`. It runs on M1 closes (a job each minute, as the M1 refinement job
+does). It has its own magic number (the main one plus 1, configurable), its own
+`TradeBook` state and its own trades table. Reason: the live executor closes any
+position with its magic number that is not in its saved state, so shared numbers
+would make each strategy close the other's trades.
+
+### D89. Python decides and trades; MQL5 draws and has buttons (owner to confirm)
+
+The prompt puts detection and execution in an MQL5 EA (`GoldScalper.mq5`) "for
+speed", mirrored in Python and checked by a parity test. That conflicts with the
+project's rules: only `execution/mt5_gateway.py` sends orders; one `TradeBook` serves
+backtests, paper and live; unattended starts send nothing before `/golive`; the kill
+switch closes everything from one place. An EA would bypass these and need a second
+copy of every risk and trade rule, kept equal forever.
+
+Signals are taken on closed M1 bars, so the EA's speed gains about one to three
+seconds (the bot reads the bar just after it closes; the order then takes the
+broker's ping). Exits do not need the EA's speed either: each child carries its
+own broker TP and SL (D90).
+
+**Recommended:** the scalper is Python (`goldsweep/scalping/`), the indicator only
+draws what Python writes and turns its buttons into commands. There is then no
+parity test and no Strategy Tester run of an EA; screenshots come from the demo
+chart and from a replay, and the backtest is Python's (D95). The owner chooses at
+the end of S0.
+
+### D90. Broker-side targets for every child, not virtual ones
+
+The prompt gives all three children the same broker TP (TP3) and has the EA close
+child 1 at TP1 and child 2 at TP2. Here child 1 is sent with TP1, child 2 with TP2
+and child 3 with TP3, all with the same SL, as the main strategy's three parts
+already are (`plan_legs`, `MT5Executor`). The result is the same, and the targets
+still work if the PC, the bot or the connection stops. `plan_legs` is generalised to
+take a split list (40/30/30 for scalps; 50/30/20 stays for the main strategy).
+
+### D91. One `scalper:` block, and limits across both strategies
+
+The prompt's `scalping:` risk block does not exist; its settings and the prompt's
+`scalper_v2:` block become one strict `scalper:` block with a `risk:` part. Starting
+values, to be measured in S1 and S6: 0.25% per scalp (all three children together);
+one active scalp; 8 scalps a day; scalper daily loss limit 1%; 3 losses in a row stop
+it for the day; 300 s cooldown in the same direction after a stop-out; time stop 900
+s (closed unless +0.3 R by then); spread at most 1.5x its median; TP1 at least 2x the
+round-trip cost.
+
+Across both strategies a new account guard applies before any new order: the
+existing 2% daily and 5% weekly loss limits counted over both strategies' closed
+trades, and at most 0.75% of equity at risk at once (0.5% main + 0.25% scalp). Each
+strategy's own limits still apply.
+
+### D92. No opposite positions; the main strategy comes first
+
+Holding a scalp short while a main trade is long (or the other way) is a hedge,
+which the project forbids. So a scalp is not opened against an open or waiting main
+trade; and when a main order is about to be placed against an open scalp, the scalp
+is closed at market first, because the main strategy is the validated one (D84) and
+scalps are short-lived. Same-direction positions of the two strategies may coexist
+within D91's combined cap. Beyond its three children the scalper never adds a
+position (the stacking in the reference video is the anti-pattern).
+
+### D93. The scalper starts on paper; the lock guards real money
+
+Whatever `MODE` says, the scalper trades its own paper book on the live feed until
+the owner sets `scalper.execution: broker` after S6's results. Then it sends orders
+on demo accounts. On a real account it also needs `execution.allow_real_account`
+and the file `data/scalp_forward_test_ok.json`, written only by a command the owner
+types after reviewing at least four weeks of forward testing. Unattended starts stay
+unarmed for the scalper as for everything else.
+
+### D94. Two strategy modes are built, two wait for rules
+
+`sweep_reclaim` (default) and `trail_rejection` have rules in the prompt and are
+built in S1. `momentum_burst` and `asia_reversion` are named without rules; they are
+not built and the strict config does not accept them until the owner describes them.
+
+### D95. How scalps are tested
+
+The project has about a million stored M1 bars (2024-2026). S1 replays them through
+the scalp engine with costs and the worse case inside a bar, so a first verdict
+(gross and net R, win rate against the breakeven win rate, trades a day, by session)
+comes before anything runs live. S6 adds a tick replay for the period the broker's
+tick history covers (size to be measured), walk-forward, the `tight` and `wide`
+ladders, and the forward test. Entries are modelled one tick after the bar closes
+plus the bot's delay.
+
+### D96. The assistant reads the database and never trades
+
+The assistant service (`python main.py --assistant`, FastAPI on 127.0.0.1:8765, a
+token from `.env`) is a separate process like the dashboard: it reads SQLite (the bot
+writes a scalper snapshot each minute and the M1 candles) and never connects to MT5.
+Quick commands are computed locally and timed. Free text goes through
+`LlmChat.complete()` (the daily budget applies; the provider is `LLM_PROVIDER`, Groq
+today, not Claude Haiku as the prompt assumes). "Quick Scalp (Manual)" only proposes;
+its confirm button writes a `commands` row that the bot carries out through the
+scalp executor with every check, and nothing while unarmed. The LLM is never on the
+order path.
+
+### D97. Quiet Telegram by default
+
+Scalps can come several an hour. Defaults: one message when a scalp is entered (with
+its box), one when it closes (net money and R), and the daily summary. Child fills,
+TP hits and every trail step are off by default (`scalper.alerts` switches), in line
+with D87. New commands: `/scalp on|off` (the scalper only), `/trail on|off`, `/stats`.
+The chart picture's renderer is chosen in S5 (Plotly's image export needs extra
+software).
+
+### D98. GoldSweep's own look; the reference material stays out
+
+The visuals follow the prompt's section 3 (charcoal background, gold accents, the
+text "GoldSweep" with a small diamond, no mascot or artwork). The reference
+screenshots and videos show a third-party commercial product: they are not copied
+into the repository (`reference/` is ignored by git), and a test checks that the
+product's name appears in no code, MQL5 file or UI text. The videos could not be
+played here; the owner's written analysis of them and the three screenshots were
+used.
+
+### D99. The chart indicator writes only a command file
+
+`GoldSweepPanel.mq5` v2 draws the scalper (tags, step line, X markers, twin bars,
+boxes, dashboard) from a `scalp.json` the bot writes, and its buttons (Adaptive
+Trail, Pause) write `scalp_commands.json`, which the bot reads like dashboard
+commands. It never trades. It shows STALE when the file stops updating. Symbol
+handling stays generic, with gold the only symbol.

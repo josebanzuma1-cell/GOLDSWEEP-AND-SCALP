@@ -31,6 +31,7 @@ review after each one.
 | 8 | Unattended running (Task Scheduler, /golive), heartbeat, watchdog, backups, VPS guide | built, tested, approved |
 | 9 | More trades and "sniper" entries: (1) entries that fill and never wait into a blocked time, (2) M1 refinement, (3) more setup models | built and tested: entries wait 2 hours (D82), M1 refinement left off (D83), breakeven only at TP1 (D84), new models alert only (D85) |
 | 10 | Session playbooks: A+ grades, per-session strategy from the evidence, monitoring before auto-trading | built, tested, approved: candidates from the analysis (D86), shadow-book monitoring, `/approve`, Asia on (D87) |
+| S | Scalper add-on alongside the main strategy (`docs/SCALPER_SPEC.md`): M1 scalps, step trail, three-child ladder, chart dashboard, MT5 assistant | S0 (review and plan, `docs/SCALPER_PLAN.md`, D88-D99) done, awaiting approval |
 
 Only `python main.py --live` sends orders to a broker, and only after
 `MODE=LIVE` in `.env`, `mode: LIVE` in `config.yaml` and the account number typed
