@@ -57,7 +57,7 @@ strategy:
   min_rr: 2.0
   entry_expiry_bars: 6
   alert_threshold: 60
-  auto_trade_threshold: 75
+  auto_trade_threshold: 60     # spec default 75; 60 on the demo account to collect evidence (D81)
   liquidity:
     swing_points: true         # unswept M15 swing highs/lows are liquidity pools
     major_swing_lookback: 10   # bars each side that make a swing point a major (external) one

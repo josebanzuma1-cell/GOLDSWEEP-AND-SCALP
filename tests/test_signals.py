@@ -202,7 +202,9 @@ def test_raid_of_the_asian_low_becomes_a_long_signal(settings: Settings) -> None
 
 
 def test_score_of_the_textbook_setup(settings: Settings) -> None:
-    signal = only_signal(feed(engine_for(settings), with_raid()))
+    # The spec's thresholds, whatever the shipped config trades from (D81).
+    engine = engine_for(settings, alert_threshold=60, auto_trade_threshold=75)
+    signal = only_signal(feed(engine, with_raid()))
     assert dict(signal.components) == pytest.approx(
         {
             # 20 x (0.6 x strength 1.0 + 0.2 x reclaimed on the same bar + 0.2 x 0.9/1.4 wick)
@@ -337,7 +339,8 @@ def test_trade_against_the_bias_is_rejected(settings: Settings) -> None:
 
 
 def test_neutral_bias_raises_the_thresholds(settings: Settings) -> None:
-    signal = only_signal(feed(engine_for(settings), with_raid(), news=0.0))
+    engine = engine_for(settings, alert_threshold=60, auto_trade_threshold=75)
+    signal = only_signal(feed(engine, with_raid(), news=0.0))
     assert signal.bias.bias is Bias.NEUTRAL
     assert (signal.alert_threshold, signal.auto_trade_threshold) == (65, 80)
     assert signal.components["htf_bias"] == 7.5

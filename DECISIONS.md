@@ -935,3 +935,51 @@ Reproduce (reports are git-ignored): `python -m goldsweep.backtest --from
 2026-01-01 --to 2026-11-19`, then the same with `--config` pointing to a copy of
 `config.yaml` with `trade_all_hours: true` and `--out` set to another folder; add
 `--threshold alert` for the stress check.
+
+### D81. The first full real-history backtest: too few trades at 75
+
+The spec's acceptance command, `python -m goldsweep.backtest --from 2024-01-01
+--to 2026-10-31`, was run on 2026-11-21 on the Exness demo feed: XAUUSDm M5,
+203,442 bars (2023-12-22 to 2026-11-06; no bars on the Good Fridays), default
+settings. The replay took 10 minutes.
+
+| | Auto-trade threshold 75 (the setting) | Alert threshold 60 (`--threshold alert`) |
+|---|---|---|
+| Setups found | 136 (about 45 a year) | the same 136 |
+| Trades | 4: none won, -0.51 R per trade, -1.0% | 31: 19% won, +0.40 R per trade, profit factor 1.96, +5.9%, max drawdown 2.6% |
+| Trades from 2024-07 on (walk-forward test windows) | 3: -0.34 R per trade | 27: +0.38 R per trade, profit factor 1.88 |
+| By session | too few to split | London 16 (+0.93 R), New York 12 (-0.03 R), overlap 3 (-0.68 R) |
+
+Why so few trades at 75: the median setup scores about 67, and only 21 of 136
+reach 75 (a neutral H1 bias asks for 80, D80). Of those, 12 expired because price
+never came back to the entry (the middle of the gap, valid for 6 bars). At 60,
+50 of 136 setups expire the same way. The news part of the score is neutral in
+the backtest (5 of its 10 points), so a live score can be up to 5 points higher
+or lower than the backtest's for the same setup.
+
+What it does and does not show:
+
+- At 75 the strategy trades about once or twice a year. Neither a backtest nor
+  the demo account can judge it at that rate: 30 trades would take well over a
+  decade.
+- At 60 the results are positive, carried by London and by a few large winners
+  (fewer than one trade in five won). This is not proof. 27 trades are still
+  below the 30 the report asks for. The walk-forward never optimised (every
+  training window had fewer than 20 trades, so it traded the defaults), so its
+  "out-of-sample" figure is the same fixed setting on later months, not an
+  independent test. And 60 is being looked at after seeing it do better than 75,
+  which is itself a form of fitting to the past.
+- Not modelled: the news blackout (no stored historical calendar), the news part
+  of the score, one-minute fills, and spread spikes.
+
+**Decision (owner, 2026-11-21):** `auto_trade_threshold` is set to 60 in
+`config.yaml` for the demo account, equal to the alert threshold, so every
+setup that is worth an alert is also traded when the risk rules allow (65 while
+the H1 bias is neutral). This is a way to collect evidence at a usable rate,
+about ten trades a year on this history, not a claim that it will be profitable.
+Risk per trade and every limit are unchanged, and `--live` still refuses a
+real-money account. The code default stays 75, as in the spec. Before any
+real-money use, the demo results are reviewed and this threshold is decided
+again. The expiry of setups before their entry is the largest leak and the next
+thing worth testing (entry price and `entry_expiry_bars`), each test being a
+10-minute replay.

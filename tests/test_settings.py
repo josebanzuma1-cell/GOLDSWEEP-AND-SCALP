@@ -27,6 +27,13 @@ from goldsweep.core.types import Mode, Timeframe
 ENV_EXAMPLE = PROJECT_ROOT / ".env.example"
 DEFAULT_TEXT = DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")
 
+#: Strategy settings the owner changed from the spec on purpose, as
+#: {setting: (spec value and built-in default, shipped value)}. Each needs a
+#: decision in DECISIONS.md; anything else that drifts from the spec fails.
+OWNER_CHANGES: dict[str, tuple[float, float]] = {
+    "auto_trade_threshold": (75, 60),  # D81: demo account, to collect evidence
+}
+
 
 def write_config(tmp_path: Path, mutate: Callable[[dict[str, Any]], None] | None = None) -> Path:
     """Copy the shipped config.yaml into ``tmp_path``, optionally changing it first."""
@@ -111,7 +118,8 @@ def test_shipped_config_matches_the_spec(settings: Settings) -> None:
         "auto_trade_threshold": 75,
     }
     strategy = cfg.strategy.model_dump()
-    assert {key: strategy[key] for key in spec_strategy} == spec_strategy
+    shipped_changes = {key: shipped for key, (_, shipped) in OWNER_CHANGES.items()}
+    assert {key: strategy[key] for key in spec_strategy} == spec_strategy | shipped_changes
     news = cfg.news
     assert (news.blackout_before_min, news.blackout_after_min) == (30, 15)  # spec 5.6
     assert (news.post_news_start_min, news.post_news_end_min) == (15, 90)
@@ -142,8 +150,15 @@ def test_shipped_config_matches_the_spec(settings: Settings) -> None:
 
 def test_built_in_defaults_equal_the_shipped_config(settings: Settings, tmp_path: Path) -> None:
     """An empty config file must behave exactly like the shipped one (apart from the
-    owner's mode switch, which an empty file leaves at PAPER)."""
-    shipped = settings.config.model_copy(update={"mode": Mode.PAPER})
+    owner's mode switch, which an empty file leaves at PAPER, and the owner's
+    recorded changes, which an empty file leaves at the spec's values)."""
+    spec_values = {key: spec for key, (spec, _) in OWNER_CHANGES.items()}
+    shipped = settings.config.model_copy(
+        update={
+            "mode": Mode.PAPER,
+            "strategy": settings.config.strategy.model_copy(update=spec_values),
+        }
+    )
     assert load(write_text(tmp_path, "")).config == shipped
 
 

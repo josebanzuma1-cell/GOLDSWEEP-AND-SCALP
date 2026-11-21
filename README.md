@@ -51,8 +51,10 @@ liquidity), on closed bars only, so a backtest and a live run see the same thing
 5. **Entry**: the middle of the fair value gap the displacement left (or an
    inversion gap, or the order block). Stop beyond the sweep's extreme,
    targets at the next external liquidity, rejected below 2R.
-6. **Score** 0-100 from ten components. 60 or more is worth an alert, 75 or
-   more may be traded once execution exists (later phases).
+6. **Score** 0-100 from ten components. 60 or more is worth an alert. The
+   spec trades from 75; on the demo account `auto_trade_threshold` is set to 60
+   so that enough trades happen to judge the strategy (D81). A neutral H1 bias
+   adds 5 to both.
 
 A score measures how complete a setup is, not how likely it is to win. Every
 setup can lose; the stop-loss is what keeps that loss small. The choices made
