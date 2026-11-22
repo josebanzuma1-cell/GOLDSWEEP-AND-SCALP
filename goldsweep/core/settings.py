@@ -838,13 +838,33 @@ class TicksConfig(_StrictModel):
     keep_days: int = Field(default=0, ge=0, le=3650)
 
 
+def _check_ladder(ladder: tuple[float, ...], name: str) -> tuple[float, ...]:
+    """One to three positive R steps, rising: TP1 < TP2 < TP3."""
+    if not 1 <= len(ladder) <= 3 or any(step <= 0 for step in ladder):
+        raise ValueError(f"each ladder in {name} needs one to three positive R steps")
+    if list(ladder) != sorted(set(ladder)):
+        raise ValueError(f"a ladder in {name} must rise: TP1 < TP2 < TP3")
+    return ladder
+
+
 IntradayRule = Literal["asian_breakout", "opening_range", "vwap_trend"]
+IntradayModeRule = Literal["sweep_reclaim", "asian_breakout", "opening_range", "vwap_trend"]
 
 
 class IntradayConfig(_StrictModel):
-    """The scalper's intraday mode (S3, D109): entries flat by the New York rollover."""
+    """The scalper's intraday mode: entries flat by the New York rollover (S3, D109).
+
+    ``rules`` and ``ladders`` are S3's backtest of the three textbook rules; the mode
+    that runs (S6, D112) trades ``mode_rules`` on M5 with ``mode_ladder``.
+    """
 
     rules: tuple[IntradayRule, ...] = ("asian_breakout", "opening_range", "vwap_trend")
+    #: What the intraday mode trades (S6): the sweep and reclaim on M5 plus two of S3's
+    #: rules; the Asian breakout lost even before costs (D109), so it is left out.
+    mode_rules: tuple[IntradayModeRule, ...] = ("sweep_reclaim", "opening_range", "vwap_trend")
+    mode_ladder: tuple[float, ...] = (1.0, 2.0, 3.0)
+    #: No intraday entry against the H1 trend (with it, or when it is flat).
+    h1_filter: bool = True
     #: A breakout close must clear the range by this much.
     breakout_buffer_atr: float = Field(default=0.1, ge=0, le=5)
     sl_buffer_atr: float = Field(default=0.1, ge=0, le=5)
@@ -869,13 +889,15 @@ class IntradayConfig(_StrictModel):
     @classmethod
     def _ladders_rise(cls, value: tuple[tuple[float, ...], ...]) -> tuple[tuple[float, ...], ...]:
         for ladder in value:
-            if not 1 <= len(ladder) <= 3 or any(step <= 0 for step in ladder):
-                raise ValueError("each intraday ladder needs one to three positive R steps")
-            if list(ladder) != sorted(set(ladder)):
-                raise ValueError("an intraday ladder must rise: TP1 < TP2 < TP3")
+            _check_ladder(ladder, "scalper.intraday.ladders")
         if not value:
             raise ValueError("scalper.intraday.ladders needs at least one ladder")
         return value
+
+    @field_validator("mode_ladder")
+    @classmethod
+    def _mode_ladder_rises(cls, value: tuple[float, ...]) -> tuple[float, ...]:
+        return _check_ladder(value, "scalper.intraday.mode_ladder")
 
     @model_validator(mode="after")
     def _stops_in_order(self) -> Self:
@@ -918,6 +940,56 @@ class SwingConfig(_StrictModel):
             if not 1 <= len(ladder) <= 3 or list(ladder) != sorted(set(ladder)) or ladder[0] <= 0:
                 raise ValueError("each swing ladder needs one to three rising positive R steps")
         return value
+
+
+class H1TrendConfig(_StrictModel):
+    """The H1 trend of the intraday and swing-scalping modes (D112): the last H1 close
+    beyond an ``ema_hours`` EMA that has moved that way over ``slope_hours`` hours."""
+
+    ema_hours: int = Field(default=50, ge=5, le=500)
+    slope_hours: int = Field(default=5, ge=1, le=100)
+
+
+SwingScalpRule = Literal["ema_pullback", "range_breakout"]
+
+
+class SwingScalpConfig(_StrictModel):
+    """The scalper's swing-scalping mode (S6, D112): M15 entries with the H1 trend, held
+    for hours to two days, flat before the weekend, swap charged."""
+
+    #: Swing scalps go only with the H1 trend (``scalper.h1_trend``).
+    rules: tuple[SwingScalpRule, ...] = ("ema_pullback", "range_breakout")
+    #: Pullback: a touch of the M15 ``ema_bars`` EMA within ``pullback_bars`` bars, then
+    #: a close back beyond it and beyond the previous bar's extreme.
+    ema_bars: int = Field(default=20, ge=5, le=200)
+    pullback_bars: int = Field(default=3, ge=1, le=20)
+    #: Breakout: an M15 close beyond the day's Asian or London range by this much.
+    breakout_buffer_atr: float = Field(default=0.1, ge=0, le=5)
+    #: The trail: the lowest low (highest high) of the last ``channel_bars`` M15 bars.
+    channel_bars: int = Field(default=20, ge=2, le=500)
+    sl_buffer_atr: float = Field(default=0.1, ge=0, le=5)
+    sl_min_atr: float = Field(default=0.5, ge=0, le=20)
+    sl_max_atr: float = Field(default=3.0, gt=0, le=50)
+    ladder: tuple[float, ...] = (1.0, 2.0, 3.0)
+    #: Closed after this long at the latest, and this long before the weekly close.
+    max_hold_hours: int = Field(default=48, ge=1, le=240)
+    weekend_buffer_min: int = Field(default=60, ge=0, le=720)
+
+    @field_validator("ladder")
+    @classmethod
+    def _ladder_rises(cls, value: tuple[float, ...]) -> tuple[float, ...]:
+        return _check_ladder(value, "scalper.swing_scalp.ladder")
+
+    @model_validator(mode="after")
+    def _stops_in_order(self) -> Self:
+        if self.sl_min_atr >= self.sl_max_atr:
+            raise ValueError("scalper.swing_scalp.sl_min_atr must be below sl_max_atr")
+        return self
+
+
+#: Each scalper mode's magic number is ``scalper.magic_number`` plus its offset (D112),
+#: so each mode's demo executor knows its own positions.
+SCALPER_MAGIC_OFFSETS = {"hft": 0, "intraday": 1, "swing": 2}
 
 
 class ScalperConfig(_StrictModel):
@@ -964,6 +1036,12 @@ class ScalperConfig(_StrictModel):
     risk: ScalperRiskConfig = ScalperRiskConfig()
     intraday: IntradayConfig = IntradayConfig()
     swing: SwingConfig = SwingConfig()
+    swing_scalp: SwingScalpConfig = SwingScalpConfig()
+    h1_trend: H1TrendConfig = H1TrendConfig()
+
+    def magic_for(self, mode: str) -> int:
+        """The magic number of ``mode``'s orders (hft, intraday, swing)."""
+        return self.magic_number + SCALPER_MAGIC_OFFSETS[mode]
 
     @field_validator("split")
     @classmethod
@@ -1011,10 +1089,12 @@ class AppConfig(_StrictModel):
 
     @model_validator(mode="after")
     def _scalper_has_its_own_magic(self) -> Self:
-        if self.scalper.magic_number == self.execution.magic_number:
+        scalper = {self.scalper.magic_for(mode) for mode in SCALPER_MAGIC_OFFSETS}
+        if self.execution.magic_number in scalper:
             raise ValueError(
-                "scalper.magic_number must differ from execution.magic_number: each "
-                "strategy closes positions with its own number that it does not know (D88)"
+                "scalper.magic_number (and the next two, one per mode, D112) must differ "
+                "from execution.magic_number: each strategy closes positions with its own "
+                "number that it does not know (D88)"
             )
         return self
 

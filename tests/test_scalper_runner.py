@@ -27,14 +27,12 @@ from goldsweep.core.settings import Settings
 from goldsweep.data.mock_broker import MockBroker
 from goldsweep.data.mt5_client import MT5Client
 from goldsweep.execution.book import Bar, ExitReason, TradePlan, to_ns
-from goldsweep.execution.executor import SCALP_LIVE_TABLE
 from goldsweep.execution.live_executor import MT5Executor, order_logger
 from goldsweep.execution.mt5_gateway import MT5Gateway
 from goldsweep.live import Trader
 from goldsweep.risk.account_guard import AccountGuard, Exposure
 from goldsweep.scalping.engine import SWEEP_RECLAIM, ScalpSetup
-from goldsweep.scalping.plan import LadderCosts, scalp_management, scalp_risk
-from goldsweep.scalping.runner import DEMO_STATE, ScalpContext
+from goldsweep.scalping.runner import ScalpContext, built_modes, demo_executor
 from goldsweep.storage.db import Database
 from tests.fake_mt5 import gold_symbol
 from tests.fake_mt5_trading import FakeTradingMT5
@@ -122,7 +120,7 @@ class Harness:
         start: dt.datetime = START,
         clock: ManualClock | None = None,
         executor: Any = None,
-        scalp_demo: Any = None,
+        scalp_demos: Any = None,
         market: pd.DataFrame = M1,
         **engine: Any,
     ) -> None:
@@ -139,10 +137,11 @@ class Harness:
             clock=self.clock,
             starting_equity=10_000.0,
             executor=executor,
-            scalp_demo=scalp_demo,
+            scalp_demos=scalp_demos,
         )
         self.engine = ScriptedEngine(setups, **engine)
-        self.trader.scalper.engine = self.engine  # type: ignore[assignment]
+        self.hft = self.trader.scalper.slots["hft"]
+        self.hft.logic.engine = self.engine  # type: ignore[attr-defined]
 
     def say(self, name: str, argument: str = "") -> str:
         return self.trader.handle(Command(name, argument, 1))
@@ -183,7 +182,7 @@ def test_a_paper_scalp_is_opened_managed_closed_and_stored(
     (row,) = db.query("SELECT id, direction, session, exit_reason, lots FROM scalp_trades")
     assert row == ("2026-11-17-HFT-001", "LONG", "london", "tp3", 0.13)
     assert db.query("SELECT COUNT(*) FROM paper_trades") == [(0,)]  # the main book: untouched
-    paper = h.trader.scalper.paper
+    paper = h.hft.paper
     assert paper.equity > 10_000.0 and paper.open_positions == []
     status = h.trader.status()
     assert "scalper: HFT (M1, seconds to 15 minutes): on paper" in status
@@ -199,9 +198,9 @@ def test_a_restart_resumes_the_open_scalp(settings: Settings, db: Database) -> N
     h = Harness(settings, db, [setup_at(SIGNAL_BAR)])
     h.scalper_on()
     h.run_until(utc(2026, 11, 17, 8, 1))  # filled, nothing reached yet
-    assert len(h.trader.scalper.paper.open_positions) == 1
+    assert len(h.hft.paper.open_positions) == 1
     restarted = Harness(settings, db, start=h.clock.now())
-    assert len(restarted.trader.scalper.paper.open_positions) == 1
+    assert len(restarted.hft.paper.open_positions) == 1
     restarted.run_until(utc(2026, 11, 17, 8, 10))
     (closed,) = restarted.notes.sent
     assert "closed (tp3, paper)" in closed
@@ -348,19 +347,14 @@ class Demo:
         self.main = MT5Executor(
             settings, gateway(config.execution.magic_number), db, clock=self.clock, armed=armed
         )
-        offset = LadderCosts.of(spec, config.backtest.costs, 0.0).breakeven_offset
-        self.scalp = MT5Executor(
-            settings,
-            gateway(config.scalper.magic_number),
-            db,
-            clock=self.clock,
-            armed=armed,
-            state_key=DEMO_STATE,
-            table=SCALP_LIVE_TABLE,
-            risk=scalp_risk(config),
-            management=scalp_management(config.scalper, offset),
-            comment_prefix="GS-SC",
-        )
+        # One executor per mode, as run_live makes them (D112).
+        self.scalps = {
+            mode: demo_executor(
+                mode, settings, self.client, spec, db, self.clock, demo=True, armed=armed
+            )
+            for mode in built_modes()
+        }
+        self.scalp = self.scalps["hft"]
 
 
 def demo_harness(settings: Settings, db: Database, **options: Any) -> tuple[Demo, Harness]:
@@ -372,7 +366,7 @@ def demo_harness(settings: Settings, db: Database, **options: Any) -> tuple[Demo
         [setup_at(SIGNAL_BAR)],
         clock=demo.clock,
         executor=demo.main,
-        scalp_demo=demo.scalp,
+        scalp_demos=demo.scalps,
     )
     return demo, h
 

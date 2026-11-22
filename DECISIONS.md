@@ -1840,3 +1840,70 @@ for the better. Report: `reports/scalper_2024-01-01_2026-10-31/`.
 (`/mode both`, `/scalper hft`) and on the demo account after `/approve scalper hft` and a
 bot restart. Results are not promised either way. S6 (intraday M5, swing scalping M15)
 and S7 (chart panel, Scalper tab, `/stats`) follow after approval.
+
+### D112. S6: the intraday (M5) and swing-scalping (M15) modes
+
+**Built** (`goldsweep/scalping/logic.py`, `bars.py`, `swing_scalp.py`, `mode_backtest.py`;
+config `scalper.intraday.mode_*`, `scalper.swing_scalp`, `scalper.h1_trend`):
+
+- **One interface for every mode.** `ModeLogic` (HFT, intraday, swing) is fed closed
+  M1 bars; each mode builds its own signal bars (`BarAggregator`: M5, M15) and the H1
+  trend from them, returns `Candidate`s, filters them (`gate`) and makes the order
+  (`plan`, always with SL and TP). The live runner and the new mode backtest use the
+  same objects in the same order (bar to the mode, bar to the book, then the gates),
+  so a backtest sees what the bot would have seen.
+- **The H1 trend** (`scalper.h1_trend`): the last H1 close beyond a 50-hour EMA that is
+  higher (lower) than 5 hours earlier; otherwise flat. Built from the M1 feed, so the
+  runner warms up on 6,000 M1 bars.
+- **Intraday on M5**, entries and management on M1, every position flat by the New York
+  rollover (`close_by`): the S1 sweep and reclaim run on M5 bars (micro and session
+  levels), plus S3's New York opening range and VWAP trend; not against the H1 trend.
+  Stops 0.5-4 ATR(M5) beyond the anchor; ladder 1/2/3 R; breakeven+ at TP1 and the stop
+  to TP1 after TP2. Left out on the evidence of D109: the Asian breakout (it lost even
+  before costs) and the VWAP trailing stop (its exits averaged -0.28 R).
+- **Swing scalping on M15**, managed on M1 bars (finer than the plan's M5, and the same
+  in the backtest and live): with the H1 trend only, an **EMA pullback** (a touch of the
+  M15 20 EMA within 3 bars, then a close back with the trend beyond the previous bar)
+  and a **range breakout** (the first M15 close beyond the day's Asian or London range
+  after its window). Stops 0.5-3 ATR(M15); ladder 1/2/3 R; breakeven+ at TP1, the stop to
+  TP1 after TP2, then the stop trails the last 20 M15 bars' low (high); swap charged;
+  closed after 2 days at most and an hour before the Friday close.
+- **Books per mode.** Each mode has its own paper book (`scalper.<mode>.paper.book`; HFT
+  keeps `scalper.paper.book`) and, on a live bot, its own demo executor with its own
+  magic number (`scalper.magic_number` +0 HFT, +1 intraday, +2 swing; the config
+  refuses a main magic number among them) and comment (`GS-SC`, `GS-SI`, `GS-SW`). The
+  trades tables are shared; ids carry the mode (`HFT`, `INT`, `SWS`). Every mode is fed
+  every minute, so a switch is immediate and a mode switched away from still manages
+  its open scalp to the end; only the selected mode opens new ones. The account guard
+  counts every scalper mode's demo positions. All three modes are built
+  (`modes.py`).
+- **The mode backtest**: `python -m goldsweep.scalping.mode_backtest --mode
+  intraday|swing|hft --from ... --to ...` (with and without costs; first two-thirds and
+  last third; by rule, session, direction, exit and year). Reported, not a gate (D111).
+
+**Results** (2024-01-01..2026-10-31, a 10,000 balance, this account's costs;
+`reports/scalper_<mode>_2024-01-01_2026-10-31/`):
+
+| Mode | Trades | A day | Won | PF | R a trade | Before costs | First 2/3 | Last 1/3 | Max DD |
+|---|---|---|---|---|---|---|---|---|---|
+| Intraday (M5) | 1,388 | 1.57 | 49.7% | 0.92 | -0.04 | +0.01 | -0.02 | -0.08 | 19.5% |
+| Swing scalping (M15) | 825 | 0.93 | 46.8% | 0.86 | -0.07 | -0.04 | -0.06 | -0.08 | 13.3% |
+| HFT (M1, D111) | 3,760 | 4.25 | 56.0% | 0.64 | -0.12 | -0.02 | | | 65.8% |
+
+- **Intraday** is the nearest to break-even of every scalper mode so far: flat before
+  costs, -0.04 R after them; New York -0.00, London -0.08; by rule, sweep and reclaim
+  -0.04 (917), opening range -0.01 (201), VWAP trend -0.07 (270); 2024 +0.04, 2025 -0.12,
+  2026 -0.05. 1,692 setups were against the H1 trend.
+- **Swing scalping** loses before costs too; the pullback -0.05 (727), the range
+  breakout -0.19 (98). At 10,000 an M15 stop allows about 0.02 lots, so a scalp often
+  cannot be split into three children; 86 setups could not be sized at all.
+- **Account size.** On the current 1,071 demo account 0.25% is about 2.68: the minimum
+  0.01 lot risks about 3.10 on a median M1 stop, 7.23 on M5 and 12.97 on M15. Sizing
+  never rounds up, so the demo executor refuses many HFT scalps and nearly every
+  intraday and swing one there ("no size"); the paper books (a notional 10,000) do not.
+  A 10,000 demo account (D111) is needed before `/approve scalper <mode>` can trade them.
+
+Nothing was tuned on this history. **Decision:** S6 is built; each mode runs on paper
+when selected and on the demo account after `/approve scalper <mode>`; the owner judges
+them on those results against these figures. Next: S7 (chart panel, Scalper tab,
+`/stats`).

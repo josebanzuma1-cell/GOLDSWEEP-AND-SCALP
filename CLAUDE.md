@@ -19,21 +19,25 @@ martingale, hedging and stacking are never built.
   `/scalper` (Telegram, or `mode:<x>` / `scalper:<x>` dashboard commands) change them,
   stored as `switch.*` state. `scalping/modes.py::REGISTRY` says which modes are built;
   flip `built` only in the phase that builds a mode.
-- **Scalper v3** (D111, plan `docs/SCALPER_MODES.md` + D111): HFT on M1 (S5), intraday
-  on M5 and swing scalping on M15 (S6). The owner tests every built mode on paper, then
-  on the demo account: backtests are reported, not gates. A selected mode runs on the
-  scalper's own paper book (`scalper.paper.book`, table `scalp_trades`, notional
-  `scalper.paper_balance`); `/approve scalper <mode>` sends it to the demo account
-  through its own `MT5Executor` (magic `scalper.magic_number`, state `scalper.live.book`,
-  table `scalp_live_trades`, comments `GS-SC|<id>|<n>`); `/revoke scalper <mode>` returns
-  it to paper. Real accounts also need `data/scalp_forward_test_ok.json` (D93).
-  `scalping/runner.py::ScalperRunner` is fed each minute by `Trader.scalper_job` (under
-  the lock): every closed M1 bar goes to the engine and to both scalper executors (the
-  step line), and a setup on the newest bar passes the gates (mode, session, activity,
-  one scalp at a time, cooldown, cost gate, `risk/account_guard.py` when it shares the
-  demo account with the main strategy, then the executor's risk checks). No opposite
-  positions: a main order first closes an opposite demo scalp (`Trader._yield_scalps`).
-  The kill switch closes scalps too; `/golive` arms both executors.
+- **Scalper v3** (D111, D112): HFT on M1 (S5), intraday on M5 and swing scalping on
+  M15 (S6). The owner tests every built mode on paper, then on the demo account:
+  backtests are reported, not gates. Each mode is a `ModeLogic`
+  (`scalping/logic.py`) fed closed M1 bars: it builds its own bars and H1 trend
+  (`scalping/bars.py`), returns `Candidate`s, filters them (`gate`) and makes the order
+  (`plan`, SL and TP always). `scalping/mode_backtest.py` replays stored M1 bars through
+  the same objects, so change a mode there, never in only the runner or the backtest.
+  `scalping/runner.py::ScalperRunner` holds one `ModeSlot` per mode: its logic, its paper
+  book (`PAPER_STATES`, table `scalp_trades`, notional `scalper.paper_balance`) and, live,
+  its demo `MT5Executor` (`DEMO_STATES`, table `scalp_live_trades`, magic
+  `scalper.magic_for(mode)`: +0/+1/+2, comments `GS-SC`/`GS-SI`/`GS-SW`). Fed each minute
+  by `Trader.scalper_job` (under the lock), every mode gets every bar; only the selected
+  mode's candidates on the newest bar meet the gates (fresh, one scalp at a time, the
+  mode's `gate`, cooldown, cost gate, `risk/account_guard.py` when it shares the demo
+  account with the main strategy, then the executor's risk checks). `/approve scalper
+  <mode>` sends a mode to the demo account, `/revoke` back to paper; real accounts also
+  need `data/scalp_forward_test_ok.json` (D93). No opposite positions: a main order
+  first closes opposite demo scalps (`Trader._yield_scalps`). The kill switch closes
+  every scalp; `/golive` arms every mode's demo executor.
 - **Ticks** (D106): off since D111 (`ticks.record: false`); the code stays.
   `TickRecorder` saves each finished hour to `data/ticks/<symbol>/<YYYY-MM-DD>/<HH>.npz`
   (UTC ms, bid, ask); read them with `load_ticks`. Brokers serve ticks through
@@ -41,12 +45,12 @@ martingale, hedging and stacking are never built.
 - **Costs:** this account charges no commission (D108); the built-in default stays
   7.00 a lot for other accounts. Order round trips are timed (`order_log.elapsed_ms`).
 - **Flat-by** (S3, D109): `TradePlan.close_by` closes a position at the first bar close
-  at or after it (`close_by_due`, exit `session_end`); the live executor must apply the
-  same rule when a mode that uses it goes live. The intraday mode failed (D109).
+  at or after it (`close_by_due`, exit `session_end`); `MT5Executor._manage` applies it
+  too (intraday: the New York rollover; swing: two days or before the weekend).
 - **Swap** (S4, D110): `SymbolSpec.swap_*` from the broker; the book charges it only with
   `Management(swap=True)` (`swap_nights`: seven nights a week, triple after Wednesday).
-  A step-trail line may offer `line_for(close_ns, long)` for a line per side. The swing
-  mode failed (D110); `modes.py` notes say why each failed mode does not run.
+  A step-trail line may offer `line_for(close_ns, long)` for a line per side (the swing
+  scalping channel). S4's daily swing rules failed (D110) and are not a mode.
 
 ## How the work is organised
 
@@ -186,7 +190,8 @@ python -m goldsweep.backtest --from 2026-01-05 --to 2026-01-30 --mock   offline
 python -m goldsweep.backtest --from 2024-01-01 --to 2026-10-31 --candidates   A+ playbooks as if approved
 python -m goldsweep.scalping.backtest --from 2024-01-01 --to 2026-10-31      scalper add-on (S1, D101)
 python -m goldsweep.scalping.intraday_backtest --from 2024-01-01 --to 2026-10-31   intraday mode (S3, D109)
-python -m goldsweep.scalping.swing_backtest --from 2014-01-01 --to 2026-10-31 [--offline]   swing mode (S4, D110)
+python -m goldsweep.scalping.swing_backtest --from 2014-01-01 --to 2026-10-31 [--offline]   daily swing rules (S4, D110)
+python -m goldsweep.scalping.mode_backtest --mode intraday|swing|hft --from 2024-01-01 --to 2026-10-31   a mode as the bot runs it (S6, D112)
 python main.py --news [--no-llm] [--mock]   calendar, headlines, news bias, scenarios
 python main.py --paper [--mock] [--no-llm]  paper trading loop (Ctrl+C stops it)
 python main.py --live [--no-llm]            live trading (MODE=LIVE + mode: LIVE + typed confirmation)

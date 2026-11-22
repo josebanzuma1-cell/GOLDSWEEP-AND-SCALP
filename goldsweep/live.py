@@ -36,7 +36,7 @@ import json
 import sys
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, TextIO
@@ -95,8 +95,12 @@ from goldsweep.risk.account_guard import AccountGuard
 from goldsweep.risk.risk_manager import NewsEvent
 from goldsweep.scalping import modes as scalper_modes
 from goldsweep.scalping.modes import MODE_NAMES
-from goldsweep.scalping.plan import LadderCosts, scalp_management, scalp_risk
-from goldsweep.scalping.runner import DEMO_STATE, PAPER_STATE, ScalpContext, ScalperRunner
+from goldsweep.scalping.runner import (
+    ScalpContext,
+    ScalperRunner,
+    built_modes,
+    demo_executor,
+)
 from goldsweep.scalping.ticks import TickRecorder, tick_folder
 from goldsweep.storage.db import Database
 
@@ -245,10 +249,11 @@ class Trader:
         starting_equity: float | None = None,
         executor: Executor | None = None,
         panel: PanelWriter | None = None,
-        scalp_demo: Executor | None = None,
+        scalp_demos: Mapping[str, Executor] | None = None,
     ) -> None:
-        """``scalp_demo`` (live only): the scalper's executor on the same MT5 account, with
-        its own magic number; approved modes send their scalps there (D111)."""
+        """``scalp_demos`` (live only): each scalper mode's executor on the same MT5
+        account, with the mode's own magic number; approved modes send their scalps
+        there (D111, D112)."""
         self._settings = settings
         self._config = settings.config
         self._broker = broker
@@ -306,19 +311,9 @@ class Trader:
             if ticks.record
             else None
         )
-        #: The scalper (D111): its paper book always, its demo executor when live.
+        #: The scalper (D111, D112): each built mode's paper book always, its demo
+        #: executor when live.
         self._scalp_lock = settings.data_dir / "scalp_forward_test_ok.json"
-        costs = LadderCosts.of(self.spec, self._config.backtest.costs, 0.0)
-        scalp_paper = PaperExecutor(
-            settings,
-            self.spec,
-            db,
-            starting_equity=self._config.scalper.paper_balance,
-            state_key=PAPER_STATE,
-            table=SCALP_PAPER_TABLE,
-            risk=scalp_risk(self._config),
-            management=scalp_management(self._config.scalper, costs.breakeven_offset),
-        )
         guard = AccountGuard(
             db,
             self._config.strategy.liquidity.day_boundary,
@@ -329,14 +324,13 @@ class Trader:
             weekly_loss_pct=self._config.risk.weekly_loss_limit_pct,
             max_open_risk_pct=self._config.scalper.risk.max_open_risk_pct,
         )
-        self.scalper = ScalperRunner(
+        self.scalper = ScalperRunner.build(
             settings,
             broker,
             db,
             self.spec,
             self._clock,
-            paper=scalp_paper,
-            demo=scalp_demo if self.live else None,
+            demos=scalp_demos if self.live else None,
             guard=guard,
         )
         saved = db.get_state(self._state_last_bar)
@@ -510,12 +504,15 @@ class Trader:
             "account keep their stop-loss and take-profit and are managed to the end."
         )
 
-    # -- the scalper (D111) ---------------------------------------------------------- #
+    # -- the scalper (D111, D112) ---------------------------------------------------- #
 
     def _scalps_to_demo(self, mode: str) -> bool:
         """Scalps of ``mode`` go to the MT5 account: approved, live, and a demo account
         (a real one also needs the forward-test file, D93)."""
-        if not self.live or self.scalper.demo is None or not self._scalper_approved(mode):
+        slot = self.scalper.slots.get(mode)
+        if not self.live or slot is None or slot.demo is None:
+            return False
+        if not self._scalper_approved(mode):
             return False
         return self.label == "LIVE DEMO" or self._scalp_lock.exists()
 
@@ -560,19 +557,20 @@ class Trader:
     def _yield_scalps(self, plan: TradePlan) -> None:
         """No hedging (D92): before a main order, an opposite scalp on the same account is
         closed. The main strategy comes first."""
-        if self.live and self.scalper.demo is not None:
-            for text in self.scalper.yield_to_main(plan.direction, self.scalper.demo):
+        if self.live:
+            for text in self.scalper.yield_to_main(plan.direction):
                 self._send(text)
 
     def _scalp_lines(self, now: dt.datetime) -> list[str]:
         lines: list[str] = []
-        for executor in self.scalper.executors:
-            where = "demo" if executor is self.scalper.demo else "paper"
-            for p in executor.open_positions:
-                lines.append(
-                    f"Scalp open ({where}): {p['direction']} {p['id']} {p['lots']:g} lots "
-                    f"from {p['fill_price']:.2f}, stop {p['stop']:.2f}"
-                )
+        for slot in self.scalper.slots.values():
+            for executor in slot.executors:
+                where = slot.where(executor)
+                for p in executor.open_positions:
+                    lines.append(
+                        f"Scalp open ({slot.name}, {where}): {p['direction']} {p['id']} "
+                        f"{p['lots']:g} lots from {p['fill_price']:.2f}, stop {p['stop']:.2f}"
+                    )
         count, total = self.scalper.today(now)
         if count:
             lines.append(f"Scalps closed in the last 24 h: {count}, {total:+.2f} R")
@@ -581,16 +579,20 @@ class Trader:
     def _scalper_picture(self, now: dt.datetime) -> dict[str, Any]:
         mode = self.scalper_mode
         count, total = self.scalper.today(now)
+        slots = self.scalper.slots.values()
         return {
             "mode": mode,
             "where": "demo" if self._scalps_to_demo(mode) else "paper",
-            "paper_equity": self.scalper.paper.equity,
+            "paper_equity": {slot.name: slot.paper.equity for slot in slots},
             "open": [
-                {**p, "where": "demo" if e is self.scalper.demo else "paper"}
-                for e in self.scalper.executors
+                {**p, "mode": slot.name, "where": slot.where(e)}
+                for slot in slots
+                for e in slot.executors
                 for p in e.open_positions
             ],
-            "waiting": [plan.id for e in self.scalper.executors for plan in e.pending_orders],
+            "waiting": [
+                plan.id for slot in slots for e in slot.executors for plan in e.pending_orders
+            ],
             "today": {"scalps": count, "r": round(total, 2)},
         }
 
@@ -2033,30 +2035,16 @@ def run_live(
             settings, gateway, db, clock=clock, demo=account.is_demo, armed=not unattended
         )
         notes = executor.reconcile()
-        # The scalper's own executor on this account (D111): its own magic number, state
-        # and trades table. It sends orders only for a mode the owner approved (/approve).
-        scalper = settings.config.scalper
-        scalp_costs = LadderCosts.of(spec, settings.config.backtest.costs, 0.0)
-        scalp_demo = MT5Executor(
-            settings,
-            MT5Gateway(
-                broker,
-                spec,
-                magic=scalper.magic_number,
-                deviation_points=execution.deviation_points,
-                order_log=order_logger(db, clock),
-            ),
-            db,
-            clock=clock,
-            demo=account.is_demo,
-            armed=not unattended,
-            state_key=DEMO_STATE,
-            table=SCALP_LIVE_TABLE,
-            risk=scalp_risk(settings.config),
-            management=scalp_management(scalper, scalp_costs.breakeven_offset),
-            comment_prefix="GS-SC",
-        )
-        notes += [f"scalper: {note}" for note in scalp_demo.reconcile()]
+        # Each scalper mode's own executor on this account (D111, D112): its own magic
+        # number, state and rules. It sends orders only for a mode the owner approved.
+        scalp_demos = {
+            mode: demo_executor(
+                mode, settings, broker, spec, db, clock, demo=account.is_demo, armed=not unattended
+            )
+            for mode in built_modes()
+        }
+        for mode, scalp_executor in scalp_demos.items():
+            notes += [f"scalper {mode}: {note}" for note in scalp_executor.reconcile()]
         notifier, bot = make_notifier(settings, db, stream=stream)
         news = NewsDesk.from_settings(settings, db, clock=clock, use_llm=use_llm)
         trader = Trader(
@@ -2069,7 +2057,7 @@ def run_live(
             bot=bot,
             executor=executor,
             panel=PanelWriter.for_broker(broker, settings),
-            scalp_demo=scalp_demo,
+            scalp_demos=scalp_demos,
         )
         found = "".join(f"\n• {note}" for note in notes)
         waiting = (

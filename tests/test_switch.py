@@ -83,6 +83,14 @@ def test_mode_answers_and_refusals(settings: Settings, db: Database) -> None:
     assert db.get_state(STRATEGIES_KEY) is None
 
 
+@pytest.fixture
+def swing_unbuilt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every mode is built since S6 (D112); the unbuilt path is still tested on swing."""
+    unbuilt = dataclasses.replace(modes.REGISTRY["swing"], built=False)
+    monkeypatch.setitem(modes.REGISTRY, "swing", unbuilt)
+
+
+@pytest.mark.usefixtures("swing_unbuilt")
 def test_scalper_modes_that_are_not_built_do_nothing(settings: Settings, db: Database) -> None:
     h = Harness(settings, db)
     reply = say(h, "scalper", "swing")
@@ -102,10 +110,11 @@ def test_scalper_modes_that_are_not_built_do_nothing(settings: Settings, db: Dat
     assert say(h, "scalper").startswith("Scalper mode: off.")
 
 
+@pytest.mark.usefixtures("swing_unbuilt")
 def test_approving_a_scalper_mode_on_a_paper_bot(settings: Settings, db: Database) -> None:
     h = Harness(settings, db)
-    assert say(h, "approve", "scalper intraday") == (
-        "The intraday mode is not built yet (phase S6): nothing to approve."
+    assert say(h, "approve", "scalper swing") == (
+        "The swing mode is not built yet (phase S6): nothing to approve."
     )
     assert say(h, "approve", "scalper tick") == "Send /approve scalper hft, intraday or swing."
     assert "Its hft mode runs on paper until /approve scalper hft." in (
@@ -124,10 +133,16 @@ def test_approving_a_scalper_mode_on_a_paper_bot(settings: Settings, db: Databas
     assert say(h, "approve", "london").startswith("Not approved: the London A+ playbook needs 20")
 
 
-def test_mode_states() -> None:
+def test_mode_states(monkeypatch: pytest.MonkeyPatch) -> None:
     assert modes.mode_state("hft", selected="off", approved=False) == modes.OFF
     assert modes.mode_state("hft", selected="hft", approved=False) == modes.PAPER
     assert modes.mode_state("hft", selected="hft", approved=True) == modes.DEMO
+    # S6 (D112): every mode is built.
+    assert all(info.built for info in modes.REGISTRY.values())
+    assert modes.mode_state("swing", selected="swing", approved=True) == modes.DEMO
+    monkeypatch.setitem(
+        modes.REGISTRY, "swing", dataclasses.replace(modes.REGISTRY["swing"], built=False)
+    )
     assert modes.mode_state("swing", selected="swing", approved=True) == modes.NOT_BUILT
     assert modes.describe("swing", selected="intraday", approved=False) == (
         "swing scalping (M15, hours to two days): off"

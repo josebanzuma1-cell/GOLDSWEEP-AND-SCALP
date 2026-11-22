@@ -26,8 +26,8 @@ class ModeInfo:
 
 REGISTRY: dict[str, ModeInfo] = {
     "hft": ModeInfo("hft", "HFT (M1, seconds to 15 minutes)", "S5", built=True),
-    "intraday": ModeInfo("intraday", "intraday (M5, flat by the New York close)", "S6"),
-    "swing": ModeInfo("swing", "swing scalping (M15, hours to two days)", "S6"),
+    "intraday": ModeInfo("intraday", "intraday (M5, flat by the New York close)", "S6", built=True),
+    "swing": ModeInfo("swing", "swing scalping (M15, hours to two days)", "S6", built=True),
 }
 MODE_NAMES = tuple(REGISTRY)
 

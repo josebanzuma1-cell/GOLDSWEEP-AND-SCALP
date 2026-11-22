@@ -31,7 +31,7 @@ review after each one.
 | 8 | Unattended running (Task Scheduler, /golive), heartbeat, watchdog, backups, VPS guide | built, tested, approved |
 | 9 | More trades and "sniper" entries: (1) entries that fill and never wait into a blocked time, (2) M1 refinement, (3) more setup models | built and tested: entries wait 2 hours (D82), M1 refinement left off (D83), breakeven only at TP1 (D84), new models alert only (D85) |
 | 10 | Session playbooks: A+ grades, per-session strategy from the evidence, monitoring before auto-trading | built, tested, approved: candidates from the analysis (D86), shadow-book monitoring, `/approve`, Asia on (D87) |
-| S | Scalper add-on alongside the main strategy (`docs/SCALPER_SPEC.md`): M1 scalps, step trail, three-child ladder, chart dashboard, MT5 assistant | S0 approved (Python engine, D89); S1 (logic, tests, first backtest) built: it loses after costs in every variant (D101), so it stays off. Research on tick ("HFT"), intraday and swing modes with a switch between them: `docs/SCALPER_MODES.md` (D102-D107), approved. S2 (the switch, the tick recorder, latency, costs; D108) approved. S3 (intraday mode) built and tested: all three rules lose after costs, so the mode does not run (D109), approved. S4 (swing mode: Donchian, momentum, pullback, swap charged) built and tested: negative over 2014-2022, positive only in the 2022-2026 rise, and a 0.01 lot needs about 76,000 at 0.25%; the mode does not run (D110), approved. Scalper v3 (D111): HFT on M1, intraday on M5, swing scalping on M15, each tested on paper then on the demo account (backtests reported, not gates); tick recorder off. S5 (HFT mode: runner, scalper paper book and demo executor with its own magic number, account guard, no opposite positions) built and tested; its backtest loses 0.12 R a scalp after costs (D111); approved, on paper then the demo account |
+| S | Scalper add-on alongside the main strategy (`docs/SCALPER_SPEC.md`): M1 scalps, step trail, three-child ladder, chart dashboard, MT5 assistant | S0 approved (Python engine, D89); S1 (logic, tests, first backtest) built: it loses after costs in every variant (D101), so it stays off. Research on tick ("HFT"), intraday and swing modes with a switch between them: `docs/SCALPER_MODES.md` (D102-D107), approved. S2 (the switch, the tick recorder, latency, costs; D108) approved. S3 (intraday mode) built and tested: all three rules lose after costs, so the mode does not run (D109), approved. S4 (swing mode: Donchian, momentum, pullback, swap charged) built and tested: negative over 2014-2022, positive only in the 2022-2026 rise, and a 0.01 lot needs about 76,000 at 0.25%; the mode does not run (D110), approved. Scalper v3 (D111): HFT on M1, intraday on M5, swing scalping on M15, each tested on paper then on the demo account (backtests reported, not gates); tick recorder off. S5 (HFT mode: runner, scalper paper book and demo executor with its own magic number, account guard, no opposite positions) built and tested; its backtest loses 0.12 R a scalp after costs (D111); approved, on paper then the demo account. S6 (intraday on M5, swing scalping on M15, one mode interface for the bot and the new mode backtest, a book and magic number per mode) built and tested: intraday -0.04 R a trade after costs (flat before), swing scalping -0.07 R (D112); awaiting approval |
 
 Only `python main.py --live` sends orders to a broker, and only after
 `MODE=LIVE` in `.env`, `mode: LIVE` in `config.yaml` and the account number typed
@@ -94,10 +94,15 @@ count again. The Asian session is switched on: its setups are graded and alerted
 and nothing trades there until it has a candidate that passes monitoring.
 `/status` shows each session's playbook and tally.
 
-**The scalper and the switch (D88-D111).** A scalper runs beside the main strategy
-with three modes: **HFT** on one-minute bars in the active sessions (London, New York
-and their overlap; built in S5), **intraday** on M5 and **swing scalping** on M15
-(S6). `/mode main|scalper|both` chooses which strategies may open trades and
+**The scalper and the switch (D88-D112).** A scalper runs beside the main strategy
+with three modes, all entering in the active sessions (London, New York and their
+overlap): **HFT** on one-minute bars (S5); **intraday** on M5, the sweep and reclaim plus
+the New York opening range and VWAP trend, not against the H1 trend, targets 1/2/3 R,
+flat by the New York rollover; and **swing scalping** on M15, pullbacks to the 20 EMA
+and Asian/London range breakouts with the H1 trend, a 20-bar channel trail, held up
+to two days and never over the weekend (S6). Each mode keeps its own paper book and
+demo executor (its own magic number), and a mode switched away from still manages its
+open scalp to the end. `/mode main|scalper|both` chooses which strategies may open trades and
 `/scalper off|hft|intraday|swing` chooses the scalper's mode (also on the dashboard's
 Control tab). A selected mode runs on the scalper's own **paper** book (a notional
 10,000) on the live feed; `/approve scalper <mode>` sends its scalps to the **demo
@@ -107,10 +112,12 @@ scalp at a time; breakeven-plus at TP1, the stop to TP1 after TP2, the step trai
 a 15-minute time stop manage it. The scalper never holds the side opposite the main
 strategy: a main order first closes an opposite scalp. Messages are two per scalp
 (placed, closed); `/status` lists open scalps and the last 24 hours. Backtests are
-reported, not gates (D111): the M1 rules lost after costs (D101; the HFT line of
-`python -m goldsweep.scalping.backtest --from 2024-01-01 --to 2026-10-31`), and so did
-the S3 intraday rules (D109) and the S4 daily swing rules (D110); paper and the demo
-account are where each mode is judged. The tick recorder (D106) is off.
+reported, not gates (D111): on 2024-2026 HFT lost 0.12 R a scalp after costs, intraday
+0.04 R (flat before costs) and swing scalping 0.07 R (D111, D112:
+`python -m goldsweep.scalping.mode_backtest --mode intraday --from 2024-01-01 --to
+2026-10-31`, likewise `--mode swing` and `--mode hft`); paper and the demo account are
+where each mode is judged. The current 1,071 demo account is too small for most
+scalps (the minimum lot risks more than 0.25%); a 10,000 demo account is recommended. The tick recorder (D106) is off.
 `/status` shows the latency: the terminal's ping and how long recent orders took.
 
 A score measures how complete a setup is, not how likely it is to win. Every

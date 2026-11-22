@@ -321,7 +321,7 @@ scalper:
   timeframe: M1
   strategy: sweep_reclaim        # sweep_reclaim | trail_rejection (HFT runs both, D111)
   sessions: [london, newyork, overlap]   # the active sessions the HFT mode trades
-  magic_number: 7341927          # its own number at the broker (main: execution.magic_number)
+  magic_number: 7341927          # HFT's number at the broker; intraday +1, swing +2 (D112)
   paper_balance: 10000           # the scalper's paper book (notional)
   activity_min: 1.0              # HFT: M1 ATR at least its median of the last...
   activity_bars: 1440            # ...1440 M1 bars (a day)
@@ -351,10 +351,15 @@ scalper:
     max_spread_multiple: 1.5
     cost_multiple: 2.0           # TP1 at least 2x the round-trip cost away
     max_open_risk_pct: 0.75      # both strategies' open risk together (account guard)
-  # The intraday rules of S3 (D109): M5 entries, flat by the New York rollover. They
-  # lost after costs on 2024-2026; the intraday mode is rebuilt on M5 in S6 (D111).
-  # python -m goldsweep.scalping.intraday_backtest --from 2024-01-01 --to 2026-10-31
+  # The intraday mode (S6, D112): M5 signals, entries and management on M1 bars, flat by
+  # the New York rollover. mode_rules/mode_ladder are what it trades; rules/ladders are
+  # S3's backtest of the textbook rules (D109: all lost after costs).
+  # python -m goldsweep.scalping.mode_backtest --mode intraday --from 2024-01-01 --to 2026-10-31
+  # python -m goldsweep.scalping.intraday_backtest --from 2024-01-01 --to 2026-10-31   (S3)
   intraday:
+    mode_rules: [sweep_reclaim, opening_range, vwap_trend]
+    mode_ladder: [1.0, 2.0, 3.0]
+    h1_filter: true              # no entry against the H1 trend
     rules: [asian_breakout, opening_range, vwap_trend]
     breakout_buffer_atr: 0.1     # a breakout close clears the range by this much
     sl_buffer_atr: 0.1
@@ -383,5 +388,24 @@ scalper:
     stop_atr: 2.0                # the first stop, in daily ATRs
     ladders: [[2.0, 4.0, 6.0], [3.0, 6.0, 10.0]]   # R steps tried; chosen on the first 2/3
     min_trades: 30               # the evidence gate (D103)
+  # The swing-scalping mode, /scalper swing (S6, D112): M15 entries with the H1 trend,
+  # managed on M1 bars, held hours to two days, flat before the weekend, swap charged.
+  # python -m goldsweep.scalping.mode_backtest --mode swing --from 2024-01-01 --to 2026-10-31
+  swing_scalp:
+    rules: [ema_pullback, range_breakout]   # only with the H1 trend (h1_trend below)
+    ema_bars: 20                 # pullback: a touch of the M15 20 EMA...
+    pullback_bars: 3             # ...within 3 bars, then a close back with the trend
+    breakout_buffer_atr: 0.1     # breakout: an M15 close beyond the Asian/London range
+    channel_bars: 20             # the stop trails the last 20 M15 bars' low (high)
+    sl_buffer_atr: 0.1
+    sl_min_atr: 0.5
+    sl_max_atr: 3.0
+    ladder: [1.0, 2.0, 3.0]
+    max_hold_hours: 48
+    weekend_buffer_min: 60       # flat this long before the Friday close
+  # The H1 trend of the intraday and swing modes (D112), built from the M1 feed.
+  h1_trend:
+    ema_hours: 50                # the last H1 close beyond a 50-hour EMA...
+    slope_hours: 5               # ...that has moved that way over 5 hours
 
 display_timezone: Africa/Kampala
