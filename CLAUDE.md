@@ -38,6 +38,14 @@ martingale, hedging and stacking are never built.
   need `data/scalp_forward_test_ok.json` (D93). No opposite positions: a main order
   first closes opposite demo scalps (`Trader._yield_scalps`). The kill switch closes
   every scalp; `/golive` arms every mode's demo executor.
+- **The scalper's views** (S7, D113): `scalping/stats.py` is the one source of results
+  per mode and account (`/stats`, the dashboard's Scalper tab, the chart); the mode
+  comes from the plan id. `scalping/chart.py::ScalpPanel` writes `scalp.json` beside
+  `signals.json` each scalper minute (head line, then one item per line, ASCII, CRLF,
+  chart-clock times plus `updated_gmt`) and reads `scalp_commands.json`; the bot carries
+  out only `PANEL_COMMANDS` (pause, resume, scalper:off), each id once, at most two
+  minutes old. `mt5/GoldSweepPanel.mq5` v2 must never trade and writes only that
+  command file; compile it with MetaEditor (`MetaEditor64.exe /compile:<file> /log`).
 - **Ticks** (D106): off since D111 (`ticks.record: false`); the code stays.
   `TickRecorder` saves each finished hour to `data/ticks/<symbol>/<YYYY-MM-DD>/<HH>.npz`
   (UTC ms, bid, ask); read them with `load_ticks`. Brokers serve ticks through

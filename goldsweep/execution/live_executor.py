@@ -371,6 +371,10 @@ class MT5Executor(Executor):
                 "stop": g.stop,
                 "targets": [p.target for p in g.parts if p.live],
                 "risk_amount": g.risk_amount,
+                # For the chart panel (S7): the plan as it was placed.
+                "stop_loss": g.plan.stop_loss,
+                "take_profits": [t for t in g.plan.targets if t is not None],
+                "fill_time": _iso(g.fill_time),
             }
             for g in self._groups
             if g.status == OPEN

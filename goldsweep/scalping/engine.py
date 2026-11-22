@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+from collections import deque
 from dataclasses import dataclass
 
 from goldsweep.analysis.structure import Direction
@@ -101,6 +102,9 @@ class ScalpEngine:
         self._previous: tuple[float, float] | None = None  # the previous bar's high, low
         self.point: TrailPoint | None = None
         self.atr: float | None = None
+        #: Recent sweeps for the chart's "X" markers: (sweep bar open time, extreme,
+        #: "high" or "low").
+        self.sweeps: deque[tuple[dt.datetime, float, str]] = deque(maxlen=60)
 
     @property
     def levels(self) -> list[Level]:
@@ -125,7 +129,9 @@ class ScalpEngine:
         if self._ranges is not None:
             self._liquidity.add(self._ranges.update(index, opened, high, low))
         for sweep in self._liquidity.update(index, high, low, close, atr):
-            self._recent.append((sweep, self._opened.get(sweep.bar, opened)))
+            swept_at = self._opened.get(sweep.bar, opened)
+            self._recent.append((sweep, swept_at))
+            self.sweeps.append((swept_at, sweep.extreme, "high" if sweep.side == HIGH else "low"))
         window = self._cfg.sweep_window
         self._recent = [(s, t) for s, t in self._recent if index - s.bar <= window]
         found: list[ScalpSetup] = []

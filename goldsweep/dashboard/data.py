@@ -32,6 +32,7 @@ from goldsweep.core.types import Timeframe
 from goldsweep.data.calendar import CalendarService, EconomicEvent, is_blackout_event
 from goldsweep.execution.book import third_target
 from goldsweep.live import COMMAND_MAX_AGE, DASHBOARD_COMMANDS, HEARTBEAT_KEY, SNAPSHOT_KEY
+from goldsweep.scalping.stats import by_mode, closed_scalps
 from goldsweep.storage.db import Database
 
 #: The bot writes a heartbeat every 10 seconds; older than this means it is not running.
@@ -375,6 +376,79 @@ def flatten(data: dict[str, Any], prefix: str = "") -> dict[str, Any]:
         elif not isinstance(value, list):
             flat[name] = value
     return flat
+
+
+# --------------------------------------------------------------------------- #
+# The scalper (S7, D113)
+# --------------------------------------------------------------------------- #
+
+
+def scalper_picture(db: Database) -> dict[str, Any]:
+    """The scalper's part of the bot's snapshot: mode, where, open scalps, today."""
+    snapshot = db.get_state(SNAPSHOT_KEY) or {}
+    return dict(snapshot.get("scalper") or {})
+
+
+def scalps(db: Database, since: dt.datetime, until: dt.datetime | None = None) -> pd.DataFrame:
+    """Closed scalps of every mode, on paper and on the demo account, oldest first."""
+    found = closed_scalps(db, since, until)
+    records = [
+        {
+            "id": s.id,
+            "mode": s.mode,
+            "where": s.where,
+            "direction": s.direction,
+            "session": s.session,
+            "opened": s.fill_time,
+            "closed": s.exit_time,
+            "fill_price": s.fill_price,
+            "stop_loss": s.stop_loss,
+            "lots": s.lots,
+            "exit": s.exit_reason,
+            "net_pnl": s.net_pnl,
+            "r": s.r_multiple,
+        }
+        for s in found
+    ]
+    columns = [
+        "id", "mode", "where", "direction", "session", "opened", "closed", "fill_price",
+        "stop_loss", "lots", "exit", "net_pnl", "r",
+    ]  # fmt: skip
+    return pd.DataFrame.from_records(records, columns=columns)
+
+
+def scalp_stats(db: Database, since: dt.datetime, until: dt.datetime | None = None) -> pd.DataFrame:
+    """Results per mode and account, next to each mode's backtest (R a trade)."""
+    rows = [
+        {
+            "mode, account": s.label,
+            "scalps": s.trades,
+            "won": s.win_rate,
+            "break-even won": s.breakeven_win_rate,
+            "profit factor": s.profit_factor,
+            "R each": s.expectancy_r,
+            "backtest R each": s.backtest_r,
+            "total R": s.total_r,
+            "net": s.net,
+        }
+        for s in by_mode(closed_scalps(db, since, until))
+    ]
+    columns = [
+        "mode, account", "scalps", "won", "break-even won", "profit factor", "R each",
+        "backtest R each", "total R", "net",
+    ]  # fmt: skip
+    return pd.DataFrame.from_records(rows, columns=columns)
+
+
+def cumulative_r(closed: pd.DataFrame) -> pd.DataFrame:
+    """Running total R after each scalp, one column per mode and account."""
+    if closed.empty:
+        return pd.DataFrame()
+    frame = closed.assign(series=closed["mode"] + ", " + closed["where"])
+    frame = frame.sort_values("closed")
+    frame["total"] = frame.groupby("series")["r"].cumsum()
+    table = frame.pivot_table(index="closed", columns="series", values="total", aggfunc="last")
+    return table.ffill()
 
 
 # --------------------------------------------------------------------------- #

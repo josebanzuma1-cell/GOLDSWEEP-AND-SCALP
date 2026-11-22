@@ -822,6 +822,10 @@ class TradeBook:
                 "stop": p.stop,
                 "targets": [leg.target for leg in p.legs],
                 "risk_amount": p.risk_amount,
+                # For the chart panel (S7): the plan as it was placed.
+                "stop_loss": p.initial_stop,
+                "take_profits": [t for t in p.plan.targets if t is not None],
+                "fill_time": p.fill_time.isoformat(),
             }
             for p in self._positions
         ]

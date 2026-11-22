@@ -371,5 +371,5 @@ HELP = (
     "/revoke <session> (back to monitoring), /mode main|scalper|both (which strategies "
     "may trade), /scalper off|hft|intraday|swing (the scalper's mode, on paper), "
     "/approve scalper <mode> (its scalps go to the demo account), /revoke scalper <mode> "
-    "(back to paper), /help"
+    "(back to paper), /stats [days] (results per scalper mode and of the main strategy), /help"
 )

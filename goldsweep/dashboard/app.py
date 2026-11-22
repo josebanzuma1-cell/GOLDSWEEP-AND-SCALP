@@ -284,6 +284,70 @@ def signals_tab(db: Database, settings: Settings, zone: dt.tzinfo) -> None:
     st.caption("traded: an order was placed; alert: alert only; blocked: a risk rule said no.")
 
 
+def scalper_tab(db: Database, zone: dt.tzinfo) -> None:
+    """The scalper (S7, D113): its mode, open scalps and results per mode and account."""
+    picture = data.scalper_picture(db)
+    today = picture.get("today") or {}
+    cols = st.columns(4)
+    cols[0].metric("Scalper mode", picture.get("mode", "-"))
+    cols[1].metric("Trades on", picture.get("where", "-"))
+    cols[2].metric("Scalps, last 24 h", today.get("scalps", 0))
+    cols[3].metric("R, last 24 h", f"{today.get('r', 0.0):+.2f}")
+    equity = picture.get("paper_equity")
+    if isinstance(equity, dict) and equity:
+        st.caption(
+            "Paper books (notional): "
+            + ", ".join(f"{mode} {value:,.2f}" for mode, value in equity.items())
+        )
+    st.subheader("Open scalps")
+    open_scalps = picture.get("open") or []
+    if open_scalps:
+        shown = pd.DataFrame(open_scalps)
+        keep = [
+            c
+            for c in ("id", "mode", "where", "direction", "lots", "fill_price", "stop", "targets")
+            if c in shown
+        ]
+        st.dataframe(shown[keep], hide_index=True)
+    else:
+        st.caption("No scalp is open.")
+    st.subheader("Results")
+    days = st.radio(
+        "Period",
+        (1, 7, 30, 90),
+        index=2,
+        horizontal=True,
+        format_func=lambda d: f"{d} day(s)",
+        key="scalp_days",
+    )
+    since = _now() - dt.timedelta(days=days)
+    table = data.scalp_stats(db, since)
+    if table.empty:
+        st.caption("No scalps closed in this period.")
+        return
+    st.dataframe(
+        table,
+        hide_index=True,
+        column_config={
+            "won": st.column_config.NumberColumn(format="percent"),
+            "break-even won": st.column_config.NumberColumn(format="percent"),
+            "profit factor": st.column_config.NumberColumn(format="%.2f"),
+            "R each": st.column_config.NumberColumn(format="%+.2f"),
+            "backtest R each": st.column_config.NumberColumn(format="%+.2f"),
+            "total R": st.column_config.NumberColumn(format="%+.2f"),
+            "net": st.column_config.NumberColumn(format="%+.2f"),
+        },
+    )
+    closed = data.scalps(db, since)
+    st.line_chart(data.cumulative_r(closed), y_label="total R")
+    st.dataframe(data.times_in(closed.iloc[::-1], ["opened", "closed"], zone), hide_index=True)
+    st.caption(
+        "After costs. A mode is judged on paper and on the demo account against its "
+        "backtest (D111, D112); past results do not predict future ones, and every scalp "
+        "can lose."
+    )
+
+
 def backtests_tab() -> None:
     reports = data.backtest_reports(_reports_dir())
     if not reports:
@@ -335,8 +399,8 @@ def control_tab(db: Database, status: data.BotStatus, zone: dt.tzinfo) -> None:
     switch = data.switch_state(db)
     st.write(
         f"Now: **{switch.get('strategies', 'main')}** may trade; scalper: "
-        f"**{switch.get('scalper', 'off')}**. A scalper mode trades only after its evidence "
-        "test and /approve scalper <mode> on Telegram; until then it runs on paper."
+        f"**{switch.get('scalper', 'off')}**. A selected scalper mode runs on paper; "
+        "/approve scalper <mode> on Telegram sends it to the demo account."
     )
     cols = st.columns(2)
     strategies = cols[0].selectbox("Strategies that may trade", ["main", "scalper", "both"])
@@ -397,13 +461,15 @@ def main() -> None:
         with Database(path) as db:
             now = _now()
             status, picture = header(db, now, zone)
-            market, trades, news, signals, backtests, control = st.tabs(
-                ["Market", "Trades", "News", "Signals", "Backtests", "Control"]
+            market, trades, scalper, news, signals, backtests, control = st.tabs(
+                ["Market", "Trades", "Scalper", "News", "Signals", "Backtests", "Control"]
             )
             with market:
                 market_tab(db, settings, picture, zone, hours)
             with trades:
                 trades_tab(db, picture, zone)
+            with scalper:
+                scalper_tab(db, zone)
             with news:
                 news_tab(db, settings, zone)
             with signals:

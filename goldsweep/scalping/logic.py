@@ -67,6 +67,25 @@ class Candidate:
     source: Any = None  # the engine's own setup
 
 
+#: Step-line points kept for the chart (three hours of M1 bars).
+CHART_POINTS = 180
+
+
+@dataclass(frozen=True, slots=True)
+class ChartMarks:
+    """A mode's picture for the chart panel: its trend, ATR, line and sweeps."""
+
+    timeframe: str  # the mode's signal bars
+    trend: str  # UP / DOWN / - (HFT: the step trail; intraday and swing: the H1 trend)
+    atr: float | None  # on the signal bars
+    line: tuple[tuple[dt.datetime, float, int], ...] = ()  # (bar open, value, trend)
+    sweeps: tuple[tuple[dt.datetime, float, str], ...] = ()  # (bar open, extreme, side)
+
+
+def _trend_name(direction: Direction | None) -> str:
+    return "-" if direction is None else ("UP" if direction is Direction.LONG else "DOWN")
+
+
 @dataclass(frozen=True, slots=True)
 class Gate:
     """The session the candidate falls in, or why it may not trade."""
@@ -202,6 +221,10 @@ class ModeLogic(ABC):
         """The line a trailing stop follows (``None``: no step trail)."""
         return None
 
+    def chart(self) -> ChartMarks:
+        """What the chart panel draws for this mode (S7, D113)."""
+        return ChartMarks("M1", "-", None)
+
     @abstractmethod
     def on_bar(
         self,
@@ -252,6 +275,8 @@ class HftLogic(ModeLogic):
         self.engine = ScalpEngine(self._cfg, bar=MINUTE, sessions=sessions, modes=HFT_RULES)
         self._atrs: deque[float] = deque(maxlen=self._cfg.activity_bars)
         self._line = _EngineLine(self)
+        #: The step line after each M1 bar, for the chart: (bar open, line, trend).
+        self.points: deque[tuple[dt.datetime, float, int]] = deque(maxlen=CHART_POINTS)
 
     @property
     def line(self) -> StepLineSource:
@@ -269,6 +294,9 @@ class HftLogic(ModeLogic):
         setups = self.engine.on_bar(opened, open_, high, low, close)
         if self.engine.atr is not None:
             self._atrs.append(self.engine.atr)
+        point = getattr(self.engine, "point", None)
+        if point is not None and not math.isnan(point.line):
+            self.points.append((opened, point.line, point.trend))
         return [
             Candidate(s.time, s.direction, s.mode, s.reference, s.extreme, s.atr, s.reason, None, s)
             for s in setups
@@ -285,6 +313,17 @@ class HftLogic(ModeLogic):
         if gate.passed and not self.active():
             return Gate(None, "a quiet market")
         return gate
+
+    def chart(self) -> ChartMarks:
+        point = getattr(self.engine, "point", None)
+        trend = point.trend if point is not None else 0
+        return ChartMarks(
+            "M1",
+            "UP" if trend > 0 else "DOWN" if trend < 0 else "-",
+            self.engine.atr,
+            tuple(self.points),
+            tuple(getattr(self.engine, "sweeps", ())),
+        )
 
     def plan(
         self, candidate: Candidate, costs: LadderCosts, *, plan_id: str, session: str | None
@@ -363,6 +402,12 @@ class IntradayLogic(ModeLogic):
                     )
         return found
 
+    def chart(self) -> ChartMarks:
+        engine = self._sweeps or self._rules
+        atr = engine.atr if engine is not None else None
+        sweeps = tuple(self._sweeps.sweeps) if self._sweeps is not None else ()
+        return ChartMarks("M5", _trend_name(self.trend.direction), atr, (), sweeps)
+
     def gate(self, candidate: Candidate) -> Gate:
         gate = super().gate(candidate)
         if not gate.passed:
@@ -409,6 +454,9 @@ class SwingLogic(ModeLogic):
     @property
     def line(self) -> StepLineSource:
         return self.engine
+
+    def chart(self) -> ChartMarks:
+        return ChartMarks("M15", _trend_name(self.trend.direction), self.engine.atr)
 
     def _close_by(self, moment: dt.datetime) -> dt.datetime:
         cfg = self._cfg.swing_scalp

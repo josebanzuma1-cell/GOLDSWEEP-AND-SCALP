@@ -94,6 +94,9 @@ from goldsweep.execution.shadow import ShadowBook, Tally, fingerprint
 from goldsweep.risk.account_guard import AccountGuard
 from goldsweep.risk.risk_manager import NewsEvent
 from goldsweep.scalping import modes as scalper_modes
+from goldsweep.scalping import stats as scalper_stats
+from goldsweep.scalping.chart import PANEL_COMMANDS, ScalpPanel
+from goldsweep.scalping.logic import ChartMarks
 from goldsweep.scalping.modes import MODE_NAMES
 from goldsweep.scalping.runner import (
     ScalpContext,
@@ -150,6 +153,8 @@ STRATEGIES_KEY = "switch.strategies"
 SCALPER_MODE_KEY = "switch.scalper_mode"
 SCALPER_APPROVED_KEY = "scalper.approved"
 STRATEGY_CHOICES = ("main", "scalper", "both")
+#: The last chart-panel command carried out (S7, D113).
+PANEL_COMMAND_KEY = "scalper.panel.command"
 MEDIAN_SPREAD_MIN_SAMPLES = 30
 EXIT_OK, EXIT_BROKER, EXIT_REFUSED, EXIT_NOT_CONFIRMED = 0, 1, 2, 3
 
@@ -314,6 +319,12 @@ class Trader:
         #: The scalper (D111, D112): each built mode's paper book always, its demo
         #: executor when live.
         self._scalp_lock = settings.data_dir / "scalp_forward_test_ok.json"
+        #: The scalper's chart file and the panel's buttons (S7, D113), beside signals.json.
+        self._scalp_panel = (
+            ScalpPanel(panel.path.parent, panel.to_chart_time, panel.digits)
+            if panel is not None
+            else None
+        )
         guard = AccountGuard(
             db,
             self._config.strategy.liquidity.day_boundary,
@@ -544,6 +555,91 @@ class Trader:
             self._send(text)
         if texts:  # a scalp opened or closed: the dashboard shows it at once
             self._write_snapshot(now)
+        if self._scalp_panel is not None:
+            self._write_scalp_panel(now)
+
+    def _scalper_status(self, mode: str) -> str:
+        """OFF / PAUSED / IN TRADE / READY, for the chart's dashboard box."""
+        slot = self.scalper.slots.get(mode)
+        if slot is None or self.strategies == "main":
+            return "OFF"
+        if self.trading != ACTIVE:
+            return "PAUSED"
+        if any(executor.open_positions for executor in slot.executors):
+            return "IN TRADE"
+        return "READY"
+
+    def _write_scalp_panel(self, now: dt.datetime) -> None:
+        """``scalp.json`` for the chart panel (S7, D113). Never stops trading."""
+        assert self._scalp_panel is not None
+        try:
+            mode = self.scalper_mode
+            slot = self.scalper.slots.get(mode) or self.scalper.slots.get("hft")
+            open_scalps = [
+                {**p, "mode": s.name, "where": s.where(e)}
+                for s in self.scalper.slots.values()
+                for e in s.executors
+                for p in e.open_positions
+            ]
+            month = scalper_stats.closed_scalps(self._db, now - dt.timedelta(days=30), now)
+            mine = [s for s in month if mode == "off" or s.mode == mode]
+            day = [s for s in mine if s.exit_time >= now - dt.timedelta(hours=24)]
+            label = scalper_stats.MODE_LABELS.get(mode, "all modes")
+            try:
+                spread: float | None = float(self._broker.spread_points(self.spec.name))
+            except BrokerError:
+                spread = None
+            median = self._db.median_spread(
+                self.spec.name,
+                since=now - dt.timedelta(days=self._config.risk.spread_median_days),
+                min_samples=MEDIAN_SPREAD_MIN_SAMPLES,
+            )
+            upcoming = self._news.next_event(now) if self._news else None
+            news = (
+                f"{upcoming.currency} {upcoming.title} in {messages.duration(upcoming.time - now)}"
+                if upcoming is not None
+                else ""
+            )
+            self._scalp_panel.write(
+                now=now,
+                mode=mode,
+                where="demo" if self._scalps_to_demo(mode) else "paper",
+                state=self.trading,
+                strategies=self.strategies,
+                status=self._scalper_status(mode),
+                marks=slot.logic.chart() if slot is not None else ChartMarks("M1", "-", None),
+                open_scalps=open_scalps,
+                closed=[s for s in month if s.exit_time >= now - dt.timedelta(hours=24)],
+                today=scalper_stats.summarize(label, day),
+                month=scalper_stats.summarize(label, mine),
+                session=self._sessions.status(now).session,
+                spread=spread,
+                spread_median=median,
+                news=news,
+                price=self.scalper.last_close,
+            )
+        except Exception as exc:  # noqa: BLE001 - the chart is a viewer only
+            log.warning("scalp panel not written", error=repr(exc))
+
+    def _panel_commands(self, now: dt.datetime) -> None:
+        """Buttons pressed on the chart panel (D99): each command once, if fresh."""
+        if self._scalp_panel is None:
+            return
+        last = int(self._db.get_state(PANEL_COMMAND_KEY, 0))
+        for command in self._scalp_panel.read_commands():
+            if command.id <= last:
+                continue
+            last = command.id
+            self._db.set_state(PANEL_COMMAND_KEY, last)
+            if abs(now - command.time) > COMMAND_MAX_AGE:
+                log.info("chart command too old: ignored", command=command.name)
+                continue
+            if command.name not in PANEL_COMMANDS:
+                log.warning("chart command refused", command=command.name)
+                continue
+            base, _, argument = command.name.partition(":")
+            reply = self.handle(Command(base, argument, 0))
+            self._send(f"📊 Chart /{f'{base} {argument}'.strip()}: {reply}")
 
     def scalper_job(self) -> None:
         try:
@@ -560,6 +656,21 @@ class Trader:
         if self.live:
             for text in self.scalper.yield_to_main(plan.direction):
                 self._send(text)
+
+    def _stats(self, argument: str) -> str:
+        """``/stats [days]``: each scalper mode on paper and demo, and the main strategy,
+        after costs, next to each mode's backtest (S7, D113)."""
+        text = argument.strip()
+        if text and not (text.isdigit() and 1 <= int(text) <= 365):
+            return "Send /stats for the last 30 days, or /stats <days> (1 to 365)."
+        days = int(text) if text else 30
+        now = ensure_utc(self._clock.now())
+        since = now - dt.timedelta(days=days)
+        scalps = scalper_stats.closed_scalps(self._db, since, now)
+        main = scalper_stats.summarize(
+            f"Main strategy ({self.label})", self.executor.trades_between(since, now)
+        )
+        return scalper_stats.stats_message(days, scalper_stats.by_mode(scalps), main)
 
     def _scalp_lines(self, now: dt.datetime) -> list[str]:
         lines: list[str] = []
@@ -1374,6 +1485,8 @@ class Trader:
                 reply = self._set_strategies(command.argument)
             elif command.name == "scalper":
                 reply = self._set_scalper_mode(command.argument)
+            elif command.name == "stats":
+                reply = self._stats(command.argument)
             else:
                 reply = self._handle(command.name)
             if command.name in ("pause", "resume", "stop", "golive", "mode", "scalper"):
@@ -1444,6 +1557,7 @@ class Trader:
                     if name != "status":
                         shown = f"{base} {argument}".strip()
                         self._send(f"🖥 Dashboard /{shown}: {reply}")
+                self._panel_commands(now)
             finally:
                 self._lock.release()
         except Exception as exc:  # noqa: BLE001 - keep the loop alive; the error is logged

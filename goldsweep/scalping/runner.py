@@ -191,6 +191,8 @@ class ScalperRunner:
         self.slots = dict(slots)
         self._guard = guard
         self._last: dt.datetime | None = None
+        #: The last M1 close seen (for the chart's current R).
+        self.last_close: float | None = None
 
     @classmethod
     def build(
@@ -308,6 +310,7 @@ class ScalperRunner:
                         texts.append(text)
                         break  # one scalp at a time
         self._last = ensure_utc(times[-1])
+        self.last_close = float(columns[3][-1])
         return texts
 
     def _report(self, slot: ModeSlot, executor: Executor, events: Sequence[BookEvent]) -> list[str]:

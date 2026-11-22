@@ -1907,3 +1907,50 @@ Nothing was tuned on this history. **Decision:** S6 is built; each mode runs on 
 when selected and on the demo account after `/approve scalper <mode>`; the owner judges
 them on those results against these figures. Next: S7 (chart panel, Scalper tab,
 `/stats`).
+
+### D113. S7: the scalper on the chart, the dashboard and Telegram
+
+**Built** (`goldsweep/scalping/stats.py`, `chart.py`; `mt5/GoldSweepPanel.mq5` v2; the
+dashboard's Scalper tab; Telegram `/stats`):
+
+- **Results per mode** (`scalping/stats.py`), one source for every view: the stored
+  scalps of both tables, the mode read from the id (`HFT`, `INT`, `SWS`), grouped by
+  mode and account (paper, demo); trades, won, the **break-even win rate** (the win rate
+  at which the average win and loss cancel), profit factor, R each and in total, net,
+  and each mode's backtest R a trade (D111, D112) beside it. After costs.
+- **`/stats [days]`** on Telegram: those lines for the last 30 days (or 1-365), plus the
+  main strategy's. Also in `/help`.
+- **The dashboard's Scalper tab**: mode, where it trades, the paper books, open scalps,
+  the results table for 1/7/30/90 days, the running total R per mode and account, and
+  the closed scalps. The bot's snapshot now carries every mode's paper balance and
+  waiting scalps; position summaries carry the plan as placed (`stop_loss`,
+  `take_profits`, `fill_time`), for the chart.
+- **`scalp.json`** (`ScalpPanel`), written beside `signals.json` after every scalper
+  minute when the chart panel is on, in the same line-per-item format: a flat head
+  (mode, PAPER/DEMO, status READY / IN TRADE / PAUSED / OFF, trend and ATR on the mode's
+  bars, session, spread and median, the next news release, the active scalp, today's
+  and 30 days' results; `updated_gmt` in true UTC), then the HFT step line (180 M1
+  points), sweep "x" markers (the engine now keeps its recent sweeps), each scalp of
+  the last 24 hours and every open one, and TP-hit markers from the stored exits.
+- **Panel v2** draws those in the GoldSweep look (charcoal box, gold header with the
+  diamond, green BUY, red SELL, dashed TPs) beside the main signals, which it still
+  draws as before; every part can be hidden from the inputs. It shows **STALE** when
+  `updated_gmt` is more than three minutes old. Compiled in MetaEditor: 0 errors, 0
+  warnings. It was not attached to a live chart here (no screenshots can be taken
+  from this session); the owner attaches it after copying it to `MQL5\Indicators`.
+- **Buttons** (D99): Pause / Resume and Scalper off. A click writes one line,
+  `{"id", "t", "cmd"}`, to `scalp_commands.json`; the bot's dashboard job (every 2 s)
+  carries out a command once (a higher id than the last, kept as state), only if at
+  most two minutes old and one of `pause`, `resume`, `scalper:off`, and reports it on
+  Telegram ("📊 Chart /pause: ..."). Narrower than D99 on purpose: the **Adaptive
+  Trail** toggle is left out (a mode's management is fixed while its scalps are open;
+  changing it mid-trade would make paper, demo and backtest disagree), and so is the
+  kill switch (one click on a chart is too easy to make by accident; it stays on
+  Telegram and the dashboard with its confirmation). The indicator never trades; that
+  file is the only thing it writes.
+
+**Not built** from the original add-on prompt, and why: the in-terminal assistant
+(`GoldSweepAssistant.mq5` and its local service, prompt section 6) is left for a later
+phase if the owner wants it; Telegram chart snapshots (PNG) are not sent, the
+dashboard shows the same picture; "twin bars" brackets and trend lines are not drawn
+(the engine uses twin-bar levels; the step line and the boxes carry the trade).

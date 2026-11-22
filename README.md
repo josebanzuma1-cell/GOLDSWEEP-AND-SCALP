@@ -31,7 +31,7 @@ review after each one.
 | 8 | Unattended running (Task Scheduler, /golive), heartbeat, watchdog, backups, VPS guide | built, tested, approved |
 | 9 | More trades and "sniper" entries: (1) entries that fill and never wait into a blocked time, (2) M1 refinement, (3) more setup models | built and tested: entries wait 2 hours (D82), M1 refinement left off (D83), breakeven only at TP1 (D84), new models alert only (D85) |
 | 10 | Session playbooks: A+ grades, per-session strategy from the evidence, monitoring before auto-trading | built, tested, approved: candidates from the analysis (D86), shadow-book monitoring, `/approve`, Asia on (D87) |
-| S | Scalper add-on alongside the main strategy (`docs/SCALPER_SPEC.md`): M1 scalps, step trail, three-child ladder, chart dashboard, MT5 assistant | S0 approved (Python engine, D89); S1 (logic, tests, first backtest) built: it loses after costs in every variant (D101), so it stays off. Research on tick ("HFT"), intraday and swing modes with a switch between them: `docs/SCALPER_MODES.md` (D102-D107), approved. S2 (the switch, the tick recorder, latency, costs; D108) approved. S3 (intraday mode) built and tested: all three rules lose after costs, so the mode does not run (D109), approved. S4 (swing mode: Donchian, momentum, pullback, swap charged) built and tested: negative over 2014-2022, positive only in the 2022-2026 rise, and a 0.01 lot needs about 76,000 at 0.25%; the mode does not run (D110), approved. Scalper v3 (D111): HFT on M1, intraday on M5, swing scalping on M15, each tested on paper then on the demo account (backtests reported, not gates); tick recorder off. S5 (HFT mode: runner, scalper paper book and demo executor with its own magic number, account guard, no opposite positions) built and tested; its backtest loses 0.12 R a scalp after costs (D111); approved, on paper then the demo account. S6 (intraday on M5, swing scalping on M15, one mode interface for the bot and the new mode backtest, a book and magic number per mode) built and tested: intraday -0.04 R a trade after costs (flat before), swing scalping -0.07 R (D112); awaiting approval |
+| S | Scalper add-on alongside the main strategy (`docs/SCALPER_SPEC.md`): M1 scalps, step trail, three-child ladder, chart dashboard, MT5 assistant | S0 approved (Python engine, D89); S1 (logic, tests, first backtest) built: it loses after costs in every variant (D101), so it stays off. Research on tick ("HFT"), intraday and swing modes with a switch between them: `docs/SCALPER_MODES.md` (D102-D107), approved. S2 (the switch, the tick recorder, latency, costs; D108) approved. S3 (intraday mode) built and tested: all three rules lose after costs, so the mode does not run (D109), approved. S4 (swing mode: Donchian, momentum, pullback, swap charged) built and tested: negative over 2014-2022, positive only in the 2022-2026 rise, and a 0.01 lot needs about 76,000 at 0.25%; the mode does not run (D110), approved. Scalper v3 (D111): HFT on M1, intraday on M5, swing scalping on M15, each tested on paper then on the demo account (backtests reported, not gates); tick recorder off. S5 (HFT mode: runner, scalper paper book and demo executor with its own magic number, account guard, no opposite positions) built and tested; its backtest loses 0.12 R a scalp after costs (D111); approved, on paper then the demo account. S6 (intraday on M5, swing scalping on M15, one mode interface for the bot and the new mode backtest, a book and magic number per mode) built and tested: intraday -0.04 R a trade after costs (flat before), swing scalping -0.07 R (D112); approved. S7 (chart panel v2 from `scalp.json` with Pause / Resume / Scalper off buttons, the dashboard's Scalper tab, Telegram `/stats`; D113) built and tested; awaiting approval |
 
 Only `python main.py --live` sends orders to a broker, and only after
 `MODE=LIVE` in `.env`, `mode: LIVE` in `config.yaml` and the account number typed
@@ -266,6 +266,7 @@ The bot answers only that chat:
 | `/scalper off\|hft\|intraday\|swing` | the scalper's mode; a selected mode runs on the scalper's paper book, and an unbuilt mode does nothing |
 | `/approve scalper <mode>` | sends that mode's scalps to the demo account (a real account also needs the forward-test file, D93) |
 | `/revoke scalper <mode>` | back to paper; scalps already open keep their stop-loss and take-profit |
+| `/stats [days]` | results after costs per scalper mode (paper and demo, next to each backtest) and of the main strategy; 30 days unless given |
 | `/help` | the list |
 
 An alert looks like this:
@@ -350,10 +351,22 @@ While the bot runs (paper or live) it writes the recent signals to
 indicator `mt5/GoldSweepPanel.mq5` draws them on the gold chart: a BUY/SELL label
 with the score, the entry, stop-loss and TP1/TP2/TP3 lines, a shaded risk box and
 reward box, and the swept level, plus a corner box with the mode, the trading
-state, the pressure estimate and the news bias. It only reads the file: it never
-trades.
+state, the pressure estimate and the news bias.
 
-To install it once:
+Version 2 (S7, D113) also draws the scalper from `scalp.json`, which the bot
+rewrites every minute: the HFT step-trail line and its sweep "x" markers; each
+recent scalp's box with SL / ENTRY / TP1-TP3 labels, "TP1/TP2/TP3" where a target
+was reached and the result (+R / -R) once it closed; and, bottom-left, the
+scalper's dashboard: mode and PAPER/DEMO badge, status (READY, IN TRADE, PAUSED,
+OFF), the market (trend, ATR, session, spread against its median, the next news
+release), the open scalp (entry, stop, targets reached, R, parts left, minutes)
+and the results after costs for today and 30 days with the break-even win rate.
+It shows STALE when the file has not been rewritten for three minutes. Its three
+buttons, Pause / Resume and Scalper off, write one line to `scalp_commands.json`
+that the bot carries out within a few seconds (and reports on Telegram); that file
+is the only thing the indicator writes. It never trades.
+
+To install it once (or to update it to a new version):
 
 1. In MetaTrader 5: File > Open Data Folder, then open `MQL5\Indicators`.
 2. Copy `mt5\GoldSweepPanel.mq5` from this project into that folder.
@@ -378,6 +391,7 @@ the trading bot. The page refreshes itself (every 30 seconds by default).
 |---|---|
 | Market | the M5 chart with liquidity pools (dashed; grey once swept), fair value gaps price has not filled (shaded) and signals with their entry, SL and TP1-TP3; the buyer/seller pressure estimate; the nearest pools; today's scenario briefs |
 | Trades | open positions and waiting entry orders, the risk status against every limit, the equity curve and results, closed trades, and (live) every order sent to MT5 with the broker's answer |
+| Scalper | the scalper's mode and where it trades, each mode's paper balance, open scalps, results per mode and account (1, 7, 30 or 90 days) next to each mode's backtest, the running total R per mode, and every closed scalp |
 | News | releases that block new entries, headlines with their AI tags (direction, impact, drivers, why), today's AI usage |
 | Signals | alerts, trades and blocked setups of the last day, week or month |
 | Backtests | each report in `reports/`: its figures, and the full HTML report to download |
