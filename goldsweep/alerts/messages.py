@@ -252,6 +252,31 @@ def trade_message(event: BookEvent, mode: str) -> str | None:
     return None
 
 
+_SCALP_WHERE = {"paper": "paper", "demo": "demo account"}
+
+
+def scalp_placed(plan: TradePlan, event: BookEvent, mode: str, where: str, reason: str) -> str:
+    """A scalp sent (quiet messages, D97: this one and the close)."""
+    targets = " / ".join(f"{t:.2f}" for t in plan.targets if t is not None)
+    lots = f", {event.lots:g} lots" if event.lots else ""
+    place = _SCALP_WHERE.get(where, where)
+    return (
+        f"⚡ Scalp {mode.upper()} {plan.direction.value} {plan.id} ({place}{lots}): "
+        f"market | SL {plan.stop_loss:.2f} | TP {targets}\n{reason}"
+    )
+
+
+def scalp_closed(trade: Any, mode: str, where: str) -> str:
+    """A scalp finished: every child closed."""
+    icon = "🏁" if trade.net_pnl >= 0 else "🔴"
+    held = duration(trade.exit_time - trade.fill_time)
+    return (
+        f"{icon} Scalp {mode.upper()} {trade.plan.id} closed ({trade.exit_reason.value}, "
+        f"{_SCALP_WHERE.get(where, where)}) after {held}: {_money(trade.net_pnl)} "
+        f"({trade.r_multiple:+.2f} R)"
+    )
+
+
 def pre_news_warning(event: EconomicEvent, now: dt.datetime, before: int, after: int) -> str:
     figures = []
     if event.forecast is not None:
@@ -344,6 +369,7 @@ HELP = (
     "until /resume), /golive <account> (after an unattended start: allow live orders), "
     "/approve <session> (a session's A+ playbook trades, after its monitoring), "
     "/revoke <session> (back to monitoring), /mode main|scalper|both (which strategies "
-    "may trade), /scalper off|tick|intraday|swing (the scalper's mode), "
-    "/approve scalper <mode> (after its evidence test), /help"
+    "may trade), /scalper off|hft|intraday|swing (the scalper's mode, on paper), "
+    "/approve scalper <mode> (its scalps go to the demo account), /revoke scalper <mode> "
+    "(back to paper), /help"
 )

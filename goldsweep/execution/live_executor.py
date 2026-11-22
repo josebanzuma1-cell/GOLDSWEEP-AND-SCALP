@@ -40,7 +40,7 @@ from typing import Any
 from goldsweep.analysis.structure import Direction
 from goldsweep.core.clock import Clock, SystemClock, ensure_utc
 from goldsweep.core.logging import get_logger
-from goldsweep.core.settings import Settings
+from goldsweep.core.settings import RiskConfig, Settings
 from goldsweep.core.types import Mode
 from goldsweep.data.broker import BrokerError
 from goldsweep.execution.book import (
@@ -49,12 +49,19 @@ from goldsweep.execution.book import (
     EventKind,
     ExitReason,
     Leg,
+    Management,
     Outcome,
+    StepLineSource,
     Trade,
     TradePlan,
     TrailSource,
     breakeven_due,
+    breakeven_plus_stop,
+    close_by_due,
+    ladder_stop,
     plan_legs,
+    step_trailed_stop,
+    time_stop_due,
     to_ns,
     trailed_stop,
 )
@@ -192,6 +199,12 @@ class _Group:
     stop_reason: ExitReason = ExitReason.STOP
     tp1_done: bool = False
     breakeven_done: bool = False
+    # The scalper's management (D111): TP2 reached, the time stop's one look, the
+    # breakeven+ offset applied to each part's own fill, and why GoldSweep closed it.
+    tp2_done: bool = False
+    time_checked: bool = False
+    stop_offset: float = 0.0
+    close_reason: ExitReason | None = None
 
     @property
     def long(self) -> bool:
@@ -220,6 +233,10 @@ class _Group:
             "stop_reason": self.stop_reason.value,
             "tp1_done": self.tp1_done,
             "breakeven_done": self.breakeven_done,
+            "tp2_done": self.tp2_done,
+            "time_checked": self.time_checked,
+            "stop_offset": self.stop_offset,
+            "close_reason": self.close_reason.value if self.close_reason else None,
         }
 
     @classmethod
@@ -238,6 +255,10 @@ class _Group:
             stop_reason=ExitReason(data["stop_reason"]),
             tp1_done=data["tp1_done"],
             breakeven_done=data["breakeven_done"],
+            tp2_done=data.get("tp2_done", False),
+            time_checked=data.get("time_checked", False),
+            stop_offset=data.get("stop_offset", 0.0),
+            close_reason=ExitReason(data["close_reason"]) if data.get("close_reason") else None,
         )
 
 
@@ -280,21 +301,33 @@ class MT5Executor(Executor):
         clock: Clock | None = None,
         demo: bool = True,
         armed: bool = True,
+        state_key: str = STATE_KEY,
+        table: str = LIVE_TABLE,
+        risk: RiskConfig | None = None,
+        management: Management | None = None,
+        comment_prefix: str = "GS",
     ) -> None:
+        """``state_key``, ``table``, ``risk`` and ``management`` default to the main
+        strategy's; the scalper passes its own, with a gateway on its own magic (D111)."""
         config = settings.config
         self.armed = armed
-        self._risk_cfg = config.risk
+        self._risk_cfg = risk or config.risk
         self._exec_cfg = config.execution
-        self._trail_after_tp1 = config.backtest.trail_after_tp1
+        self._rules = management
+        self._trail_after_tp1 = config.backtest.trail_after_tp1 if management is None else False
+        self._state_key = state_key
+        self._table = table
+        self._comment = comment_prefix
         self._gateway = gateway
         self._spec = gateway.spec
         self._db = db
         self._clock = clock or SystemClock()
+        self.demo = demo
         self.label = "LIVE DEMO" if demo else "LIVE"
         account = gateway.account()
         self.login = account.login
         self.manager = RiskManager(
-            config.risk,
+            self._risk_cfg,
             config.news,
             config.strategy.liquidity.day_boundary,
             equity=account.balance,
@@ -302,7 +335,7 @@ class MT5Executor(Executor):
         self._groups: list[_Group] = []
         self._outbox: list[BookEvent] = []
         self._positions: dict[int, BrokerPosition] = {}
-        saved = db.get_state(STATE_KEY)
+        saved = db.get_state(state_key)
         self.restored = saved is not None
         if saved is not None:
             self.manager.restore(saved["risk"])
@@ -316,7 +349,7 @@ class MT5Executor(Executor):
 
     def _save(self) -> None:
         self._db.set_state(
-            STATE_KEY,
+            self._state_key,
             {"risk": self.manager.to_state(), "groups": [g.to_state() for g in self._groups]},
         )
 
@@ -348,7 +381,7 @@ class MT5Executor(Executor):
         return [g.plan for g in self._groups if g.status == PENDING]
 
     def trades_between(self, start: dt.datetime, end: dt.datetime) -> list[TradeRow]:
-        return trades_between(self._db, LIVE_TABLE, start, end)
+        return trades_between(self._db, self._table, start, end)
 
     # -- new trades ----------------------------------------------------------------- #
 
@@ -438,7 +471,8 @@ class MT5Executor(Executor):
                 f"the margin level would fall to {level:.0f}% (minimum {floor_pct:g}%)",
             )
 
-        legs = plan_legs(plan, lots, spec, self._risk_cfg)
+        split = self._rules.split if self._rules is not None else None
+        legs = plan_legs(plan, lots, spec, self._risk_cfg, split)
         group = _Group(
             plan=plan,
             lots=0.0,
@@ -453,7 +487,11 @@ class MT5Executor(Executor):
                 volume=leg.lots,
                 stop_loss=plan.stop_loss,
                 take_profit=leg.target,
-                comment=f"GS {plan.id} {index}/{len(legs)}",
+                comment=(
+                    f"GS {plan.id} {index}/{len(legs)}"
+                    if self._comment == "GS"
+                    else f"{self._comment}|{plan.id}|{index}"  # e.g. GS-SC|<id>|1 (D111)
+                ),
                 signal_id=plan.id,
                 limit_price=limit,
             )
@@ -524,6 +562,8 @@ class MT5Executor(Executor):
                 self.manager.book(leg.exit_time, leg.pnl)
                 if leg.reason is ExitReason.TP1:
                     group.tp1_done = True
+                elif leg.reason is ExitReason.TP2:
+                    group.tp2_done = True
                 closed_now.append(part)
                 changed = True
             events += self._group_events(group, closed_now)
@@ -583,6 +623,8 @@ class MT5Executor(Executor):
         if deal_reason in (DEAL_REASON_SL, DEAL_REASON_SO):
             moved = abs(part.broker_sl - group.plan.stop_loss) > self._spec.point / 2
             return group.stop_reason if moved and part.broker_sl else ExitReason.STOP
+        if group.close_reason is not None:
+            return group.close_reason  # GoldSweep closed it: time stop or flat-by (D111)
         return ExitReason.MANUAL  # the kill switch, or closed by hand in MT5
 
     def _group_events(self, group: _Group, closed_now: list[_Part]) -> list[BookEvent]:
@@ -659,7 +701,7 @@ class MT5Executor(Executor):
             take_profit_3=plan.take_profit_3,
         )
         self.manager.position_closed(trade.exit_time, trade.net_pnl)
-        store_trade(self._db, LIVE_TABLE, trade)
+        store_trade(self._db, self._table, trade)
         events.append(
             BookEvent(
                 EventKind.CLOSED,
@@ -701,7 +743,7 @@ class MT5Executor(Executor):
 
     def _wanted_stop(self, group: _Group, part: _Part) -> float:
         if group.stop_reason is ExitReason.BREAKEVEN and part.open_price is not None:
-            return part.open_price
+            return part.open_price + group.sign * group.stop_offset  # breakeven(+)
         return group.stop
 
     def _enforce_stops(self, note: str = "") -> list[BookEvent]:
@@ -747,8 +789,15 @@ class MT5Executor(Executor):
             self._save()
         return events
 
-    def on_bar(self, bar: Bar, trail: TrailSource | None = None) -> list[BookEvent]:
-        """A closed M5 bar: expiries, TP1-first, breakeven at +1R, trailing after TP1."""
+    def on_bar(
+        self,
+        bar: Bar,
+        trail: TrailSource | None = None,
+        line: StepLineSource | None = None,
+    ) -> list[BookEvent]:
+        """A closed bar: expiries, TP1-first, breakeven, trailing after TP1; with the
+        scalper's ``Management`` also breakeven+, the stop to TP1 after TP2, the step
+        trail, the time stop and the flat-by time (D111), by the shared rules."""
         events = self.sync()
         for group in list(self._groups):
             plan = group.plan
@@ -796,9 +845,85 @@ class MT5Executor(Executor):
                 )
                 if level is not None:
                     group.stop, group.stop_reason = level, ExitReason.TRAIL
+            if self._rules is not None:
+                self._manage(group, bar, line)
         events += self._enforce_stops()
         self._save()
         return events
+
+    def _manage(self, group: _Group, bar: Bar, line: StepLineSource | None) -> None:
+        """The scalper's rules on one open trade, after a closed bar (D111)."""
+        rules = self._rules
+        assert rules is not None and group.fill_price is not None and group.fill_time is not None
+        plan, long = group.plan, group.long
+        if close_by_due(plan, bar.close_time):
+            self._close_group(group, ExitReason.SESSION_END, "flat-by time")
+            return
+        if rules.time_stop is not None and not group.tp1_done and not group.time_checked:
+            held = bar.close_time - group.fill_time
+            if held >= rules.time_stop:
+                group.time_checked = True
+                if time_stop_due(
+                    long=long,
+                    fill_price=group.fill_price,
+                    initial_stop=plan.stop_loss,
+                    close=bar.close,
+                    spread=bar.spread,
+                    held=held,
+                    after=rules.time_stop,
+                    min_r=rules.time_stop_min_r,
+                ):
+                    self._close_group(group, ExitReason.TIME, "time stop")
+                    return
+        if group.breakeven_done and rules.breakeven_offset > 0 and not group.stop_offset:
+            plus = breakeven_plus_stop(
+                long=long,
+                stop=group.stop,
+                fill_price=group.fill_price,
+                offset=rules.breakeven_offset,
+                close=bar.close,
+                spread=bar.spread,
+            )
+            if plus is not None:  # each part's stop is its own fill plus the offset
+                group.stop_offset = rules.breakeven_offset
+                group.stop = plus
+        if rules.stop_to_tp1_after_tp2 and group.tp2_done:
+            level = ladder_stop(
+                long=long,
+                stop=group.stop,
+                take_profit_1=plan.take_profit_1,
+                close=bar.close,
+                spread=bar.spread,
+            )
+            if level is not None:
+                group.stop, group.stop_reason = level, ExitReason.TRAIL
+        if rules.step_trail and line is not None:
+            sided = getattr(line, "line_for", None)
+            value, atr = sided(bar.close_ns, long) if sided else line.line_at(bar.close_ns)
+            buffer = rules.trail_buffer_atr * atr if not math.isnan(atr) else 0.0
+            level = step_trailed_stop(
+                long=long,
+                stop=group.stop,
+                line=value,
+                buffer=buffer,
+                close=bar.close,
+                spread=bar.spread,
+            )
+            if level is not None:
+                group.stop, group.stop_reason = level, ExitReason.TRAIL
+
+    def _close_group(self, group: _Group, reason: ExitReason, why: str) -> None:
+        """Close every open part at market (the time stop, the flat-by time); the next
+        sync reads the exits. Waits while unarmed, like every order (D78)."""
+        if not self.armed:
+            return
+        group.close_reason = reason
+        for part in group.parts:
+            position = self._positions.get(part.position) if part.live else None
+            if position is not None:
+                self._gateway.close(
+                    position, comment=f"{self._comment} {why}"[:31], signal_id=group.plan.id
+                )
 
     def _withdraw(
         self, group: _Group, kind: EventKind, outcome: Outcome, detail: str

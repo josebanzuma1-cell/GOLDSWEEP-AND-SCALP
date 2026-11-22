@@ -6,7 +6,11 @@ swing modes and any other modes that make a good scalper; for a plan; for a swit
 between them; and for each mode to keep the tools that help it and drop the ones
 that do not. This follows S1 (D101): the first scalper lost after costs on 2024-2026.
 
-Nothing here is built yet. Decisions are D102-D107 in `DECISIONS.md`.
+Decisions are D102-D107 in `DECISIONS.md`. **Superseded in part by D111** (the owner's
+goal of 2026-11-22): the tick mode became the **HFT mode on closed M1 bars** (no tick
+history needed; the tick recorder is off), intraday moves to M5 and swing to swing
+scalping on M15, and the evidence gate is replaced by testing every built mode on
+paper and then on the demo account, with the backtests reported beside the results.
 
 ## 1. What the research says
 

@@ -199,12 +199,13 @@ def test_built_in_defaults_equal_the_shipped_config(settings: Settings, tmp_path
 def test_the_switch_and_the_tick_recorder_settings(settings: Settings, tmp_path: Path) -> None:
     switch, ticks = settings.config.switch, settings.config.ticks
     assert (switch.strategies, switch.scalper_mode) == ("main", "off")
-    assert (ticks.record, ticks.keep_days) == (True, 0)
+    assert (ticks.record, ticks.keep_days) == (False, 0)  # set aside by the owner (D111)
     # YAML reads a bare off as False: it still means "off".
     unquoted = load(write_text(tmp_path, "switch:\n  scalper_mode: off\n")).config.switch
     assert unquoted.scalper_mode == "off"
+    assert load(write_text(tmp_path, "switch:\n  scalper_mode: hft\n")).config.switch.scalper_mode
     with pytest.raises(ConfigError, match="scalper_mode"):
-        load(write_text(tmp_path, "switch:\n  scalper_mode: hft\n"))
+        load(write_text(tmp_path, "switch:\n  scalper_mode: tick\n"))  # renamed hft (D111)
     with pytest.raises(ConfigError, match="strategies"):
         load(write_text(tmp_path, "switch:\n  strategies: all\n"))
 

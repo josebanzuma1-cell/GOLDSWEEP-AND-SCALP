@@ -20,7 +20,7 @@ from goldsweep.core.settings import DEFAULT_CONFIG_PATH, Settings, StepTrailConf
 from goldsweep.core.types import Timeframe
 from goldsweep.data.mock_broker import default_gold_spec
 from goldsweep.execution.book import ExitReason
-from goldsweep.scalping.backtest import Variant, main, prepare, simulate, variants
+from goldsweep.scalping.backtest import HFT, Variant, main, prepare, simulate, variants
 from goldsweep.storage.db import Database
 from tests.helpers import bars, quiet, utc
 from tests.test_scalp_engine import SELL_ROWS
@@ -83,11 +83,25 @@ def test_the_gates_before_an_order(small: Settings) -> None:
     }
     later = prepare(small, MARKET, default_gold_spec(), utc(2026, 11, 17, 8), end)
     assert simulate(small, later, Variant("sweep_reclaim", True, 0.5)).trades == []
-    assert [v.name for v in variants(small.config)][:2] == [
+    names = [v.name for v in variants(small.config)]
+    assert names[:2] == [
         "sweep_reclaim, H1 bias, 0.5 R steps",
         "sweep_reclaim, H1 bias, 2 R steps",
     ]
-    assert len(variants(small.config)) == 8
+    # S5 (D111): the HFT mode as it runs live comes last.
+    assert names[-1] == "hft (both rules), no bias filter, active only, 0.5 R steps"
+    assert len(names) == 9
+
+
+def test_the_hft_variant_trades_both_rules_and_skips_quiet_markets(small: Settings) -> None:
+    start, end = utc(2026, 11, 17), utc(2026, 11, 18)
+    prepared = prepare(small, MARKET, default_gold_spec(), start, end)
+    hft = Variant(HFT, False, 0.5, activity=True)
+    assert simulate(small, prepared, hft).outcomes == {"traded": 1}  # the sweep_reclaim sell
+    # Fewer than 20 bars of ATR here: the filter waits (as live). A median far above it:
+    calm = dataclasses.replace(prepared, atr_median=prepared.atrs * 0 + 100.0)
+    assert simulate(small, calm, hft).outcomes == {"quiet": 1}
+    assert simulate(small, calm, dataclasses.replace(hft, activity=False)).trades
 
 
 def test_the_command_writes_a_reproducible_report(
@@ -118,7 +132,8 @@ def test_the_command_writes_a_reproducible_report(
     assert summary.pop("command").endswith("first") and again.pop("command").endswith("second")
     assert summary == again  # nothing but the command line (its --out) differs
     chosen = summary["configured"]
-    assert chosen["variant"] == "sweep_reclaim, H1 bias, 0.5 R steps"
+    # The breakdowns are the HFT mode's, as the live runner trades it (D111).
+    assert chosen["variant"] == "hft (both rules), no bias filter, active only, 0.5 R steps"
     assert chosen["breakdowns"]["session"]["london"]["trades"] == 1
     assert any("news blackout" in note for note in summary["limitations"])
     rows = trades.splitlines()

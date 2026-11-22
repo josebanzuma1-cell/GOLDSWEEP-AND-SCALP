@@ -81,12 +81,22 @@ from goldsweep.data.calendar import CalendarService, EconomicEvent, is_blackout_
 from goldsweep.data.factory import create_broker
 from goldsweep.data.news import NewsService
 from goldsweep.execution.book import Bar, BookEvent, EventKind, TradePlan, refined_plan, to_ns
-from goldsweep.execution.executor import Executor, PaperExecutor
+from goldsweep.execution.executor import (
+    LIVE_TABLE,
+    PAPER_TABLE,
+    SCALP_LIVE_TABLE,
+    SCALP_PAPER_TABLE,
+    Executor,
+    PaperExecutor,
+)
 from goldsweep.execution.panel import PanelWriter
 from goldsweep.execution.shadow import ShadowBook, Tally, fingerprint
+from goldsweep.risk.account_guard import AccountGuard
 from goldsweep.risk.risk_manager import NewsEvent
 from goldsweep.scalping import modes as scalper_modes
 from goldsweep.scalping.modes import MODE_NAMES
+from goldsweep.scalping.plan import LadderCosts, scalp_management, scalp_risk
+from goldsweep.scalping.runner import DEMO_STATE, PAPER_STATE, ScalpContext, ScalperRunner
 from goldsweep.scalping.ticks import TickRecorder, tick_folder
 from goldsweep.storage.db import Database
 
@@ -235,7 +245,10 @@ class Trader:
         starting_equity: float | None = None,
         executor: Executor | None = None,
         panel: PanelWriter | None = None,
+        scalp_demo: Executor | None = None,
     ) -> None:
+        """``scalp_demo`` (live only): the scalper's executor on the same MT5 account, with
+        its own magic number; approved modes send their scalps there (D111)."""
         self._settings = settings
         self._config = settings.config
         self._broker = broker
@@ -292,6 +305,39 @@ class Trader:
             )
             if ticks.record
             else None
+        )
+        #: The scalper (D111): its paper book always, its demo executor when live.
+        self._scalp_lock = settings.data_dir / "scalp_forward_test_ok.json"
+        costs = LadderCosts.of(self.spec, self._config.backtest.costs, 0.0)
+        scalp_paper = PaperExecutor(
+            settings,
+            self.spec,
+            db,
+            starting_equity=self._config.scalper.paper_balance,
+            state_key=PAPER_STATE,
+            table=SCALP_PAPER_TABLE,
+            risk=scalp_risk(self._config),
+            management=scalp_management(self._config.scalper, costs.breakeven_offset),
+        )
+        guard = AccountGuard(
+            db,
+            self._config.strategy.liquidity.day_boundary,
+            tables=(LIVE_TABLE, SCALP_LIVE_TABLE)
+            if self.live
+            else (PAPER_TABLE, SCALP_PAPER_TABLE),
+            daily_loss_pct=self._config.risk.daily_loss_limit_pct,
+            weekly_loss_pct=self._config.risk.weekly_loss_limit_pct,
+            max_open_risk_pct=self._config.scalper.risk.max_open_risk_pct,
+        )
+        self.scalper = ScalperRunner(
+            settings,
+            broker,
+            db,
+            self.spec,
+            self._clock,
+            paper=scalp_paper,
+            demo=scalp_demo if self.live else None,
+            guard=guard,
         )
         saved = db.get_state(self._state_last_bar)
         self._last_bar = dt.datetime.fromisoformat(saved) if saved else None
@@ -359,7 +405,7 @@ class Trader:
 
     @property
     def scalper_mode(self) -> str:
-        """off / tick / intraday / swing."""
+        """off / hft / intraday / swing."""
         value = self._db.get_state(SCALPER_MODE_KEY)
         if value == "off" or value in MODE_NAMES:
             return str(value)
@@ -389,60 +435,164 @@ class Trader:
     def _scalper_note(self) -> str:
         mode = self.scalper_mode
         if mode == "off":
-            return " The scalper's mode is off: send /scalper tick, intraday or swing."
+            return " The scalper's mode is off: send /scalper hft, intraday or swing."
         info = scalper_modes.REGISTRY[mode]
         if not info.built:
-            if info.note:
-                return f" Its {mode} mode does not run: {info.note}."
             return f" Its {mode} mode is not built yet (phase {info.phase}): nothing runs."
-        if not (info.passed and self._scalper_approved(mode)):
-            return f" Its {mode} mode runs on paper only until it passes and is approved."
-        return ""
+        if self._scalps_to_demo(mode):
+            return f" Its {mode} mode trades on the demo account."
+        if not self._scalper_approved(mode):
+            return f" Its {mode} mode runs on paper until /approve scalper {mode}."
+        return f" Its {mode} mode runs on paper."
 
     def _set_scalper_mode(self, argument: str) -> str:
         choice = argument.strip().lower()
         if not choice:
             return (
-                f"Scalper mode: {self._scalper_line()}. Send /scalper off, tick, intraday or swing."
+                f"Scalper mode: {self._scalper_line()}. Send /scalper off, hft, intraday or swing."
             )
         if choice != "off" and choice not in MODE_NAMES:
-            return "Send /scalper off, /scalper tick, /scalper intraday or /scalper swing."
+            return "Send /scalper off, /scalper hft, /scalper intraday or /scalper swing."
         self._db.set_state(SCALPER_MODE_KEY, choice)
         log.info("scalper mode switched", mode=choice)
         if choice == "off":
             return "✅ Scalper off: no scalper mode runs."
         line = scalper_modes.describe(
-            choice, selected=choice, approved=self._scalper_approved(choice)
+            choice, selected=choice, approved=self._scalps_to_demo(choice)
         )
         if self.strategies == "main":
             line += ". The scalper may not trade while /mode is main"
         return f"✅ Scalper mode: {line}."
 
+    @property
+    def scalper_line(self) -> str:
+        """The scalper's mode and where it trades, for messages."""
+        return self._scalper_line()
+
     def _scalper_line(self) -> str:
         mode = self.scalper_mode
         if mode == "off":
             return "off"
-        return scalper_modes.describe(mode, selected=mode, approved=self._scalper_approved(mode))
+        return scalper_modes.describe(mode, selected=mode, approved=self._scalps_to_demo(mode))
 
     def _approve_scalper(self, mode: str) -> str:
-        """``/approve scalper <mode>``: only a mode whose evidence test passed (D103)."""
+        """``/approve scalper <mode>``: a built mode sends its orders to the demo account
+        (D111). A real account also needs the forward-test file (D93)."""
         if mode not in MODE_NAMES:
-            return "Send /approve scalper tick, intraday or swing."
+            return "Send /approve scalper hft, intraday or swing."
         info = scalper_modes.REGISTRY[mode]
         if not info.built:
-            if info.note:
-                return f"Not approved: the {mode} mode does not run ({info.note})."
             return f"The {mode} mode is not built yet (phase {info.phase}): nothing to approve."
-        if not info.passed:
+        if self.live and self.label != "LIVE DEMO" and not self._scalp_lock.exists():
             return (
-                f"Not approved: the {mode} mode has not passed its evidence test, so it can "
-                "only run on paper."
+                f"Not approved: this is a real account. The scalper trades real money only "
+                f"after a reviewed forward test ({self._scalp_lock.name}, D93)."
             )
         approved = list(self._db.get_state(SCALPER_APPROVED_KEY, []))
         if mode not in approved:
             approved.append(mode)
             self._db.set_state(SCALPER_APPROVED_KEY, approved)
-        return f"✅ The scalper's {mode} mode is approved for trading when it is selected."
+        where = "the demo account" if self.live else "paper (this bot trades on paper only)"
+        return (
+            f"✅ The scalper's {mode} mode sends its orders to {where} when it is selected "
+            f"and /mode allows the scalper. /revoke scalper {mode} returns it to paper."
+        )
+
+    def _revoke_scalper(self, mode: str) -> str:
+        """``/revoke scalper <mode>``: back to paper. Open scalps keep their SL and TP."""
+        approved = list(self._db.get_state(SCALPER_APPROVED_KEY, []))
+        if mode not in approved:
+            return f"The {mode} mode was not approved: it already runs on paper."
+        approved.remove(mode)
+        self._db.set_state(SCALPER_APPROVED_KEY, approved)
+        return (
+            f"↩️ The scalper's {mode} mode is back on paper. Scalps already open on the demo "
+            "account keep their stop-loss and take-profit and are managed to the end."
+        )
+
+    # -- the scalper (D111) ---------------------------------------------------------- #
+
+    def _scalps_to_demo(self, mode: str) -> bool:
+        """Scalps of ``mode`` go to the MT5 account: approved, live, and a demo account
+        (a real one also needs the forward-test file, D93)."""
+        if not self.live or self.scalper.demo is None or not self._scalper_approved(mode):
+            return False
+        return self.label == "LIVE DEMO" or self._scalp_lock.exists()
+
+    def _scalp_context(self, now: dt.datetime) -> ScalpContext:
+        mode = self.scalper_mode
+        info = scalper_modes.REGISTRY.get(mode)
+        may_open = (
+            self.trading == ACTIVE
+            and self.strategies in ("scalper", "both")
+            and info is not None
+            and info.built
+        )
+        demo = self._scalps_to_demo(mode)
+        return ScalpContext(
+            mode=mode,
+            may_open=may_open,
+            demo=demo,
+            events=self._news.blackouts(now) if self._news else (),
+            # On the demo account the scalp shares the account with the main strategy.
+            main_exposures=ScalperRunner.exposures(self.executor) if demo else None,
+            equity=self.executor.equity if demo else 0.0,
+        )
+
+    def scalper_tick(self) -> None:
+        """Each minute: the scalper's new M1 bars, its open scalps and any new scalp."""
+        now = ensure_utc(self._clock.now())
+        texts = self.scalper.step(self._scalp_context(now))
+        for text in texts:
+            self._send(text)
+        if texts:  # a scalp opened or closed: the dashboard shows it at once
+            self._write_snapshot(now)
+
+    def scalper_job(self) -> None:
+        try:
+            with self._lock:
+                self.scalper_tick()
+        except BrokerError as exc:
+            log.error("broker error in the scalper job", error=str(exc))
+        except Exception as exc:  # noqa: BLE001 - keep the loop alive; the error is logged
+            log.error("scalper job failed", error=repr(exc))
+
+    def _yield_scalps(self, plan: TradePlan) -> None:
+        """No hedging (D92): before a main order, an opposite scalp on the same account is
+        closed. The main strategy comes first."""
+        if self.live and self.scalper.demo is not None:
+            for text in self.scalper.yield_to_main(plan.direction, self.scalper.demo):
+                self._send(text)
+
+    def _scalp_lines(self, now: dt.datetime) -> list[str]:
+        lines: list[str] = []
+        for executor in self.scalper.executors:
+            where = "demo" if executor is self.scalper.demo else "paper"
+            for p in executor.open_positions:
+                lines.append(
+                    f"Scalp open ({where}): {p['direction']} {p['id']} {p['lots']:g} lots "
+                    f"from {p['fill_price']:.2f}, stop {p['stop']:.2f}"
+                )
+        count, total = self.scalper.today(now)
+        if count:
+            lines.append(f"Scalps closed in the last 24 h: {count}, {total:+.2f} R")
+        return lines
+
+    def _scalper_picture(self, now: dt.datetime) -> dict[str, Any]:
+        mode = self.scalper_mode
+        count, total = self.scalper.today(now)
+        return {
+            "mode": mode,
+            "where": "demo" if self._scalps_to_demo(mode) else "paper",
+            "paper_equity": self.scalper.paper.equity,
+            "open": [
+                {**p, "where": "demo" if e is self.scalper.demo else "paper"}
+                for e in self.scalper.executors
+                for p in e.open_positions
+            ],
+            "waiting": [plan.id for e in self.scalper.executors for plan in e.pending_orders],
+            "today": {"scalps": count, "r": round(total, 2)},
+        }
 
     def _set_trading(self, state: str) -> None:
         self._db.set_state(self._state_trading, state)
@@ -613,6 +763,7 @@ class Trader:
                     "risk": self.executor.manager.status(now),
                     "armed": self.executor.armed,
                     "switch": {"strategies": self.strategies, "scalper": self._scalper_line()},
+                    "scalper": self._scalper_picture(now),
                 },
             )
         except Exception as exc:  # noqa: BLE001 - the dashboard is a viewer only
@@ -741,6 +892,7 @@ class Trader:
             if plan.expiry_note:
                 text += f" (before {plan.expiry_note})"
         else:
+            self._yield_scalps(plan)
             event = self.executor.submit(
                 plan, spread_points=spread, median_spread_points=median, events=blackouts
             )
@@ -1014,7 +1166,13 @@ class Trader:
         )
 
     def _revoke(self, argument: str) -> str:
-        """``/revoke <session>``: back to the trading rule; the candidate is monitored again."""
+        """``/revoke <session>``: back to the trading rule; the candidate is monitored again.
+
+        ``/revoke scalper <mode>`` returns a scalper mode to paper instead (D111).
+        """
+        first, _, rest = argument.strip().partition(" ")
+        if first.lower() == "scalper":
+            return self._revoke_scalper(rest.strip().lower())
         playbook = parse_playbook(argument)
         if playbook is None:
             return "Send /revoke asia, /revoke london or /revoke newyork."
@@ -1122,6 +1280,7 @@ class Trader:
                 since=now - dt.timedelta(days=self._config.risk.spread_median_days),
                 min_samples=MEDIAN_SPREAD_MIN_SAMPLES,
             )
+            self._yield_scalps(plan)
             event = self.executor.submit(
                 plan, spread_points=spread, median_spread_points=median, events=blackouts
             )
@@ -1229,6 +1388,7 @@ class Trader:
         if argument.strip() != str(executor.login):
             return f"Not confirmed. To allow live orders, send exactly: /golive {executor.login}"
         notes = executor.arm()
+        notes += [f"scalper: {note}" for note in self.scalper.arm()]
         self._report(executor.sync(ensure_utc(self._clock.now())))
         found = "".join(f"\n• {note}" for note in notes)
         return (
@@ -1349,13 +1509,19 @@ class Trader:
         tick = self._broker.get_tick(self.spec.name)
         events = self.executor.close_everything(now, tick.bid, tick.ask, "kill switch (/stop)")
         self._report(events)
+        scalps = self.scalper.close_everything("kill switch (/stop)")
+        for text in scalps:
+            self._send(text)
         closed = sum(1 for e in events if e.kind is EventKind.CLOSED)
         cancelled = sum(1 for e in events if e.kind is EventKind.CANCELLED)
-        left = len(self.executor.open_positions)
+        left = len(self.executor.open_positions) + sum(
+            len(e.open_positions) for e in self.scalper.executors
+        )
         warning = f" {left} position(s) could not be closed: check MT5 now!" if left else ""
+        scalp_text = f", {len(scalps)} scalp(s) closed" if scalps else ""
         return (
-            f"🛑 Kill switch: {closed} position(s) closed, {cancelled} order(s) cancelled. "
-            f"Trading is stopped until /resume.{warning}"
+            f"🛑 Kill switch: {closed} position(s) closed{scalp_text}, {cancelled} order(s) "
+            f"cancelled. Trading is stopped until /resume.{warning}"
         )
 
     def poll_commands(self, wait_seconds: int = 0) -> None:
@@ -1388,6 +1554,8 @@ class Trader:
             text += f"\nWaiting for an M1 entry: {waiting}"
         text += "\n" + "\n".join(self._playbook_lines())
         text += f"\nStrategies that may trade: {self.strategies} | scalper: {self._scalper_line()}"
+        for line in self._scalp_lines(now):
+            text += f"\n{line}"
         latency = self.latency_line()
         if latency:
             text += f"\nLatency: {latency}"
@@ -1602,6 +1770,13 @@ def _schedule(trader: Trader, settings: Settings, bot: TelegramBot | None, clock
             coalesce=True,
             misfire_grace_time=30,
         )
+    scheduler.add_job(  # the scalper (D111): every minute, whatever its mode
+        trader.scalper_job,
+        CronTrigger(minute="*", second=delay, timezone=UTC),
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=30,
+    )
     scheduler.add_job(
         trader.news_tick,
         IntervalTrigger(minutes=1, timezone=UTC),
@@ -1858,6 +2033,30 @@ def run_live(
             settings, gateway, db, clock=clock, demo=account.is_demo, armed=not unattended
         )
         notes = executor.reconcile()
+        # The scalper's own executor on this account (D111): its own magic number, state
+        # and trades table. It sends orders only for a mode the owner approved (/approve).
+        scalper = settings.config.scalper
+        scalp_costs = LadderCosts.of(spec, settings.config.backtest.costs, 0.0)
+        scalp_demo = MT5Executor(
+            settings,
+            MT5Gateway(
+                broker,
+                spec,
+                magic=scalper.magic_number,
+                deviation_points=execution.deviation_points,
+                order_log=order_logger(db, clock),
+            ),
+            db,
+            clock=clock,
+            demo=account.is_demo,
+            armed=not unattended,
+            state_key=DEMO_STATE,
+            table=SCALP_LIVE_TABLE,
+            risk=scalp_risk(settings.config),
+            management=scalp_management(scalper, scalp_costs.breakeven_offset),
+            comment_prefix="GS-SC",
+        )
+        notes += [f"scalper: {note}" for note in scalp_demo.reconcile()]
         notifier, bot = make_notifier(settings, db, stream=stream)
         news = NewsDesk.from_settings(settings, db, clock=clock, use_llm=use_llm)
         trader = Trader(
@@ -1870,6 +2069,7 @@ def run_live(
             bot=bot,
             executor=executor,
             panel=PanelWriter.for_broker(broker, settings),
+            scalp_demo=scalp_demo,
         )
         found = "".join(f"\n• {note}" for note in notes)
         waiting = (
@@ -1879,7 +2079,8 @@ def run_live(
         )
         notifier.send(
             f"🚀 GoldSweep {trader.label} started: {spec.name} on account {account.login}, "
-            f"balance {account.balance:,.2f} {account.currency}, trading {trader.trading}."
+            f"balance {account.balance:,.2f} {account.currency}, trading {trader.trading}. "
+            f"Strategies: {trader.strategies}; scalper: {trader.scalper_line}."
             f"{found}{waiting}" + ("" if bot else " (Telegram not configured: alerts print here.)")
         )
         trader.sync()

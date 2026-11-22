@@ -1763,3 +1763,80 @@ one strong trend is the trend, not an edge the gate can accept.
 **Decision:** the swing mode does not run (`modes.py` says why); with S1 (D101) and S3
 (D109) every scalper mode tested so far has failed. The tick mode (S5) needs 8 weeks of
 recorded ticks and a VPS under 20 ms; the recorder runs since 2026-11-22.
+
+### D111. Scalper v3 and S5: the HFT mode on M1, tested on paper and on the demo account
+
+**The owner's goal (2026-11-22):** a scalping bot with an HFT mode on the one-minute
+timeframe in the active sessions, and intraday and swing-scalping modes; the tick
+recorder set aside; every approved build tested on paper and on the demo account.
+
+**Decisions:**
+
+- **Backtests are reported, not gates.** D103's evidence gate no longer stops a built
+  mode: it runs on the scalper's paper book when selected, and `/approve scalper <mode>`
+  sends it to the demo account. The backtests stay, and their results are shown beside
+  the paper and demo results so the owner judges both. Real money stays locked
+  (`execution.allow_real_account` and `data/scalp_forward_test_ok.json`, D93).
+- **Timeframes** (measured on the last 12 months; stop 1.5 ATR, balance a 0.01 lot needs
+  at 0.25%): M1 3.10 (1,241), M5 7.23 (2,893), M15 12.97 (5,188), H1 27.45 (10,980), H4
+  54.39 (21,755), D1 128.71 (51,484). So: **HFT on M1**, **intraday on M5** (entries and
+  management on M1) and **swing scalping on M15** (managed on M5), S6. Daily or H4 swing
+  stays out (D110). A 10,000 demo account is recommended for testing all three; the
+  scalper's paper book is a notional `scalper.paper_balance` (10,000).
+- **Renamed** `tick` to `hft` (config literal, `modes.py`, dashboard, commands); the HFT
+  mode works on closed M1 bars, so it needs no tick history. `ticks.record` defaults
+  to false (config and built-in); the recorder code stays.
+- **The HFT mode** trades S1's two rules together (`sweep_reclaim` and
+  `trail_rejection`) with the ladder 0.5/1/1.5 R, breakeven-plus at TP1, the stop to TP1
+  after TP2, the step trail and the 15-minute time stop. It drops the H1 bias filter
+  (`htf_filter` now only names S1's backtest variants) and adds an **activity filter**:
+  a scalp only while the M1 ATR is at least `activity_min` x its median over the last
+  `activity_bars` bars (1.0 x a day), because a quiet market cannot pay the spread.
+- **Executors.** `PaperExecutor` and `MT5Executor` take a state key, a trades table, a
+  `RiskConfig` and a `Management`; the defaults are the main strategy's, unchanged. The
+  scalper's paper book is `scalper.paper.book` (table `scalp_trades`); its demo executor
+  is `scalper.live.book` (table `scalp_live_trades`) on a gateway with
+  `scalper.magic_number`, comments `GS-SC|<id>|<n>`. Migration 8 adds both tables.
+- **`MT5Executor` applies `Management`** with the trade book's functions
+  (`breakeven_plus_stop`, `ladder_stop`, `step_trailed_stop`, `time_stop_due`,
+  `close_by_due`): stops move through `gateway.modify`, the time stop and the flat-by
+  time close at market through `gateway.close` (not while unarmed). The breakeven-plus
+  stop is each position's own fill plus the offset.
+- **The account guard** (`risk/account_guard.py`) checks a demo scalp against the
+  account: the realised result of both strategies today and this week against the
+  account's 2% and 5% limits, at most `scalper.risk.max_open_risk_pct` (0.75%) open risk
+  across both, and **no opposite positions** (no hedging). The main strategy comes
+  first: before a main order, an opposite demo scalp is closed (`Trader._yield_scalps`).
+  Paper scalps are a separate notional book and are not guarded against the main one.
+- **The runner** (`scalping/runner.py`), run each minute by `Trader.scalper_job` under
+  the bot's lock, whatever the mode: warms the engine on 600 M1 bars, feeds each new
+  closed bar to the engine and to both scalper executors (with the step line), and
+  checks a setup on the newest bar: mode selected and built, `/mode` scalper or both,
+  trading active, not older than 90 seconds, one scalp at a time, an active session,
+  the activity filter, the 5-minute cooldown after a stop-out, the stop and cost gate
+  (`scalp_plan`), the account guard (demo), then the executor's own checks (limits,
+  spread, news blackout). Ids are `<date>-HFT-<n>`. Messages are two per scalp
+  (placed, closed, D97). The kill switch closes scalps on both books; `/golive` arms the
+  scalper's demo executor too; `/status` and the dashboard snapshot show the mode,
+  where it trades, open scalps and the last 24 hours.
+
+**The HFT backtest** (the `hft` line added to `python -m goldsweep.scalping.backtest`,
+2024-01-01..2026-10-31, costs of this account):
+
+| Variant | Trades | A day | Won | Break-even win rate | PF | R a scalp | Before costs | Total R | Max DD |
+|---|---|---|---|---|---|---|---|---|---|
+| HFT: both rules, no H1 filter, active only, 0.5 R | 3,760 | 4.25 | 56.0% | 65.3% | 0.64 | -0.12 | -0.02 | -438.7 | 65.8% |
+| S1 `sweep_reclaim`, no H1 filter, 0.5 R (for comparison) | 4,667 | 5.28 | 55.2% | 65.8% | 0.61 | -0.13 | -0.02 | -624.0 | 78.0% |
+
+The activity filter skipped 7,348 setups and helped a little; the HFT mode still loses
+about 0.12 R a scalp after costs and is flat before them, in every session, direction
+and year (2024 -0.15, 2025 -0.10, 2026 -0.09). At 0.25% a scalp that is roughly -0.13%
+of the scalper's balance a trading day, before its 1% daily limit. The owner chose to
+test it on paper and on the demo account anyway; this is the figure the paper and
+demo results will be compared with, and nothing suggests live results will differ
+for the better. Report: `reports/scalper_2024-01-01_2026-10-31/`.
+
+**Status:** S5 built and tested; the HFT mode runs on paper once selected
+(`/mode both`, `/scalper hft`) and on the demo account after `/approve scalper hft` and a
+bot restart. Results are not promised either way. S6 (intraday M5, swing scalping M15)
+and S7 (chart panel, Scalper tab, `/stats`) follow after approval.

@@ -342,7 +342,7 @@ def control_tab(db: Database, status: data.BotStatus, zone: dt.tzinfo) -> None:
     strategies = cols[0].selectbox("Strategies that may trade", ["main", "scalper", "both"])
     if cols[0].button("Apply", disabled=not status.alive, key="apply_mode"):
         sent = st.session_state["command_id"] = data.send_command(db, f"mode:{strategies}", now)
-    mode = cols[1].selectbox("Scalper mode", ["off", "tick", "intraday", "swing"])
+    mode = cols[1].selectbox("Scalper mode", ["off", "hft", "intraday", "swing"])
     if cols[1].button("Apply", disabled=not status.alive, key="apply_scalper"):
         sent = st.session_state["command_id"] = data.send_command(db, f"scalper:{mode}", now)
     st.divider()

@@ -20,7 +20,7 @@ from typing import Any
 
 from goldsweep.core.clock import ensure_utc
 from goldsweep.core.logging import get_logger
-from goldsweep.core.settings import Settings
+from goldsweep.core.settings import RiskConfig, Settings
 from goldsweep.core.types import Mode
 from goldsweep.data.broker import SymbolSpec
 from goldsweep.execution.book import (
@@ -28,6 +28,8 @@ from goldsweep.execution.book import (
     BookEvent,
     EventKind,
     ExitReason,
+    Management,
+    StepLineSource,
     Trade,
     TradeBook,
     TradePlan,
@@ -88,8 +90,14 @@ class Executor(ABC):
         """Risk-check, size and place an entry order for ``plan``."""
 
     @abstractmethod
-    def on_bar(self, bar: Bar, trail: TrailSource | None = None) -> list[BookEvent]:
-        """Apply a newly closed bar to orders and positions."""
+    def on_bar(
+        self,
+        bar: Bar,
+        trail: TrailSource | None = None,
+        line: StepLineSource | None = None,
+    ) -> list[BookEvent]:
+        """Apply a newly closed bar to orders and positions (``line``: the scalper's
+        step-trail line, used with ``Management.step_trail``)."""
 
     @abstractmethod
     def close_everything(
@@ -143,20 +151,29 @@ class PaperExecutor(Executor):
         db: Database,
         *,
         starting_equity: float,
+        state_key: str = STATE_KEY,
+        table: str | None = None,
+        risk: RiskConfig | None = None,
+        management: Management | None = None,
     ) -> None:
+        """``state_key``, ``table``, ``risk`` and ``management`` default to the main
+        strategy's; the scalper passes its own (D111)."""
         config = settings.config
         self._db = db
+        self._state_key = state_key
+        self._table = table or PAPER_TABLE
         self._book = TradeBook(
             spec,
-            config.risk,
+            risk or config.risk,
             config.news,
             config.strategy.liquidity.day_boundary,
             equity=starting_equity,
             slippage_points=config.backtest.costs.slippage_points,
             commission_per_lot=config.backtest.costs.commission_per_lot,
-            trail_after_tp1=config.backtest.trail_after_tp1,
+            trail_after_tp1=config.backtest.trail_after_tp1 if management is None else False,
+            management=management,
         )
-        saved = db.get_state(STATE_KEY)
+        saved = db.get_state(state_key)
         self.restored = saved is not None
         if saved is not None:
             self._book.restore(saved)
@@ -190,10 +207,10 @@ class PaperExecutor(Executor):
         return self._book.orders
 
     def _save(self, events: Sequence[BookEvent]) -> None:
-        self._db.set_state(STATE_KEY, self._book.to_state())
+        self._db.set_state(self._state_key, self._book.to_state())
         for event in events:
             if event.kind is EventKind.CLOSED and event.trade is not None:
-                store_trade(self._db, PAPER_TABLE, event.trade)
+                store_trade(self._db, self._table, event.trade)
 
     # -- trading -------------------------------------------------------------- #
 
@@ -217,10 +234,15 @@ class PaperExecutor(Executor):
         self._save([event])
         return event
 
-    def on_bar(self, bar: Bar, trail: TrailSource | None = None) -> list[BookEvent]:
+    def on_bar(
+        self,
+        bar: Bar,
+        trail: TrailSource | None = None,
+        line: StepLineSource | None = None,
+    ) -> list[BookEvent]:
         if self._book.idle:
             return []
-        events = self._book.on_bar(bar, trail)
+        events = self._book.on_bar(bar, trail, line)
         self._save(events)
         return events
 
@@ -248,16 +270,19 @@ class PaperExecutor(Executor):
     # -- history -------------------------------------------------------------- #
 
     def trades_between(self, start: dt.datetime, end: dt.datetime) -> list[TradeRow]:
-        return trades_between(self._db, PAPER_TABLE, start, end)
+        return trades_between(self._db, self._table, start, end)
 
 
 # --------------------------------------------------------------------------- #
-# Closed trades in SQLite (paper_trades and live_trades share one layout)
+# Closed trades in SQLite (every trades table shares one layout)
 # --------------------------------------------------------------------------- #
 
 PAPER_TABLE = "paper_trades"
 LIVE_TABLE = "live_trades"
-_TABLES = frozenset({PAPER_TABLE, LIVE_TABLE})
+#: The scalper's closed trades (D111): on paper, and on the demo account.
+SCALP_PAPER_TABLE = "scalp_trades"
+SCALP_LIVE_TABLE = "scalp_live_trades"
+_TABLES = frozenset({PAPER_TABLE, LIVE_TABLE, SCALP_PAPER_TABLE, SCALP_LIVE_TABLE})
 
 
 def store_trade(db: Database, table: str, trade: Trade) -> None:

@@ -14,8 +14,10 @@ Two passes, like the main backtester:
    book's rules), which is harsh on one-minute trades.
 
 The gates before an order, in order: one scalp at a time; the configured sessions
-(and the clock's blocks); the H1 bias; the cooldown after a stop-out; a stop and a
-ladder that pass the cost gate; the book's own risk checks (daily limits, spread).
+(and the clock's blocks); the activity filter (the HFT variant, S5); the H1 bias; the
+cooldown after a stop-out; a stop and a ladder that pass the cost gate; the book's own
+risk checks (daily limits, spread). The HFT variant is what the live runner trades
+(``scalping/runner.py``): both rules, no H1 filter, the activity filter.
 There is no historical calendar, so no news blackout: a limitation, reported.
 
 Report files carry no run timestamps, so a rerun on the same data is identical.
@@ -25,8 +27,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import dataclasses
 import datetime as dt
 import json
+import math
 import sys
 from collections import Counter
 from collections.abc import Callable, Sequence
@@ -60,20 +64,27 @@ DISCLAIMER = (
 )
 
 
+#: The HFT mode as it runs live (S5, D111): both rules' setups, the activity filter.
+HFT = "hft"
+
+
 @dataclass(frozen=True, slots=True)
 class Variant:
     """One way of trading the setups."""
 
-    mode: str
+    mode: str  # a rule of MODES, or HFT for both
     htf_filter: bool
     tp_step_r: float
     costs: bool = True
+    activity: bool = False  # the HFT activity filter (scalper.activity_min)
 
     @property
     def name(self) -> str:
+        mode = "hft (both rules)" if self.mode == HFT else self.mode
         bias = "H1 bias" if self.htf_filter else "no bias filter"
+        active = ", active only" if self.activity else ""
         cost = "" if self.costs else ", no costs"
-        return f"{self.mode}, {bias}, {self.tp_step_r:g} R steps{cost}"
+        return f"{mode}, {bias}{active}, {self.tp_step_r:g} R steps{cost}"
 
 
 @dataclass
@@ -107,6 +118,7 @@ class Prepared:
     setups: list[ScalpSetup]
     lines: np.ndarray  # the step line after each bar
     atrs: np.ndarray  # ATR after each bar
+    atr_median: np.ndarray  # the median ATR over the last ``activity_bars`` bars
     bias_close_ns: np.ndarray
     bias_values: list[Bias]
     spread_pts: np.ndarray
@@ -189,12 +201,15 @@ def prepare(
     costs = config.backtest.costs
     points = spread_points(bars, costs)
     median = rolling_median(points, bars.index, config.risk.spread_median_days)
+    # As the live runner: the median of the ATRs seen so far, once there are 20.
+    atr_median = pd.Series(atrs).rolling(scalper.activity_bars, min_periods=20).median().to_numpy()
     return Prepared(
         bars=bars,
         spec=spec,
         setups=setups,
         lines=lines,
         atrs=atrs,
+        atr_median=atr_median,
         bias_close_ns=bias_ns,
         bias_values=bias_values,
         spread_pts=points,
@@ -243,7 +258,8 @@ def simulate(settings: Settings, prepared: Prepared, variant: Variant) -> ScalpR
     lines = _Lines(close_ns, prepared.lines, prepared.atrs)
     sessions = SessionCalculator(config.sessions)
     start_ns, end_ns = to_ns(prepared.start), to_ns(prepared.end)
-    setups = [s for s in prepared.setups if s.mode == variant.mode]
+    setups = [s for s in prepared.setups if variant.mode in (HFT, s.mode)]
+    activity_min = config.scalper.activity_min
     trades: list[Trade] = []
     outcomes: Counter[str] = Counter()
     rejections: Counter[str] = Counter()
@@ -288,6 +304,15 @@ def simulate(settings: Settings, prepared: Prepared, variant: Variant) -> ScalpR
             status = sessions.status(setup.time)
             if not status.allowed or status.session not in config.scalper.sessions:
                 outcomes["outside_sessions"] += 1
+                continue
+            middle = float(prepared.atr_median[i])
+            if (
+                variant.activity
+                and activity_min > 0
+                and not math.isnan(middle)
+                and float(prepared.atrs[i]) < activity_min * middle
+            ):
+                outcomes["quiet"] += 1
                 continue
             if variant.htf_filter and not _bias_at(prepared, to_ns(setup.time)).allows(
                 setup.direction
@@ -344,11 +369,23 @@ def simulate(settings: Settings, prepared: Prepared, variant: Variant) -> ScalpR
 
 
 def variants(config: AppConfig) -> list[Variant]:
-    """Both modes, with and without the H1 filter, the configured ladder and the wide one."""
+    """Both rules, with and without the H1 filter, the configured ladder and the wide one;
+    then the HFT mode as it runs live (S5)."""
     ladders = sorted({config.scalper.tp_step_r, 2.0})
     return [
-        Variant(mode, htf, ladder) for mode in MODES for htf in (True, False) for ladder in ladders
+        *(
+            Variant(mode, htf, ladder)
+            for mode in MODES
+            for htf in (True, False)
+            for ladder in ladders
+        ),
+        hft_variant(config),
     ]
+
+
+def hft_variant(config: AppConfig) -> Variant:
+    """What the live HFT mode trades: both rules, no H1 filter, the activity filter."""
+    return Variant(HFT, False, config.scalper.tp_step_r, activity=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -526,15 +563,9 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
     runs: list[tuple[ScalpRun, ScalpRun]] = []
     for variant in variants(config):
         net = simulate(settings, prepared, variant)
-        gross = simulate(
-            settings,
-            prepared,
-            Variant(variant.mode, variant.htf_filter, variant.tp_step_r, costs=False),
-        )
+        gross = simulate(settings, prepared, dataclasses.replace(variant, costs=False))
         runs.append((net, gross))
-    configured = Variant(
-        config.scalper.strategy, config.scalper.htf_filter, config.scalper.tp_step_r
-    )
+    configured = hft_variant(config)  # the mode that runs live (D111)
     chosen = next(net for net, _ in runs if net.variant == configured)
     period = (f"{args.start:%Y-%m-%d}", f"{args.end:%Y-%m-%d}")
     folder = args.out or settings.config_path.parent / "reports" / (

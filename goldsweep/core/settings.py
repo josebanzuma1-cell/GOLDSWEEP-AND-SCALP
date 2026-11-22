@@ -800,9 +800,11 @@ class ScalperRiskConfig(_StrictModel):
     max_spread_multiple: float = Field(default=1.5, ge=1, le=10)
     #: TP1 must be at least this many times the round-trip cost away.
     cost_multiple: float = Field(default=2.0, ge=0, le=20)
+    #: Money at risk in open positions of both strategies together (account guard).
+    max_open_risk_pct: float = Field(default=0.75, gt=0, le=5)
 
 
-ScalperMode = Literal["off", "tick", "intraday", "swing"]
+ScalperMode = Literal["off", "hft", "intraday", "swing"]
 StrategyChoice = Literal["main", "scalper", "both"]
 
 
@@ -828,9 +830,10 @@ class SwitchConfig(_StrictModel):
 
 
 class TicksConfig(_StrictModel):
-    """The tick recorder (D106): every gold tick saved, for testing the tick mode."""
+    """The tick recorder (D106): every gold tick saved. Off by default since the owner set
+    it aside (D111); the code stays for a later tick study."""
 
-    record: bool = True
+    record: bool = False
     #: Days of recorded ticks kept (0 keeps them all).
     keep_days: int = Field(default=0, ge=0, le=3650)
 
@@ -925,8 +928,17 @@ class ScalperConfig(_StrictModel):
 
     timeframe: Literal["M1", "M5"] = "M1"
     strategy: ScalpStrategy = "sweep_reclaim"
-    #: Session windows (as in ``sessions:``) in which scalps may open.
-    sessions: tuple[ScalpSession, ...] = ("asia", "london", "newyork", "overlap")
+    #: Session windows (as in ``sessions:``) in which scalps may open: the active ones.
+    sessions: tuple[ScalpSession, ...] = ("london", "newyork", "overlap")
+    #: The scalper's own magic number on the broker, so neither strategy touches the
+    #: other's positions (D88); must differ from ``execution.magic_number``.
+    magic_number: int = Field(default=7_341_927, ge=1, le=2_147_483_647)
+    #: The notional balance of the scalper's paper book (D111).
+    paper_balance: float = Field(default=10_000.0, gt=0)
+    #: HFT activity filter: scalp only while the M1 ATR is at least this share of its
+    #: median over the last ``activity_bars`` bars (quiet markets cannot pay the spread).
+    activity_min: float = Field(default=1.0, ge=0, le=10)
+    activity_bars: int = Field(default=1440, ge=20, le=20_000)
     #: Scalp only with the H1 bias (or when it is neutral).
     htf_filter: bool = True
     atr_period: int = Field(default=14, ge=2, le=200)
@@ -996,6 +1008,15 @@ class AppConfig(_StrictModel):
     switch: SwitchConfig = SwitchConfig()
     ticks: TicksConfig = TicksConfig()
     display_timezone: ZoneName = "Africa/Kampala"
+
+    @model_validator(mode="after")
+    def _scalper_has_its_own_magic(self) -> Self:
+        if self.scalper.magic_number == self.execution.magic_number:
+            raise ValueError(
+                "scalper.magic_number must differ from execution.magic_number: each "
+                "strategy closes positions with its own number that it does not know (D88)"
+            )
+        return self
 
     @model_validator(mode="after")
     def _grid_within_strategy(self) -> Self:

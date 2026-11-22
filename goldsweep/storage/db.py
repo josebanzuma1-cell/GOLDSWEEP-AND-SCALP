@@ -269,6 +269,53 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
         ALTER TABLE order_log ADD COLUMN elapsed_ms REAL;
         """,
     ),
+    (
+        8,
+        """
+        -- Scalper S5 (D111): its closed trades, on paper and on the demo account,
+        -- in the layout of paper_trades.
+        CREATE TABLE scalp_trades (
+            id          TEXT PRIMARY KEY,
+            direction   TEXT    NOT NULL,
+            session     TEXT,
+            score       REAL    NOT NULL,
+            signal_time INTEGER NOT NULL,
+            fill_time   INTEGER NOT NULL,
+            exit_time   INTEGER NOT NULL,
+            fill_price  REAL    NOT NULL,
+            stop_loss   REAL    NOT NULL,
+            take_profit_1 REAL  NOT NULL,
+            take_profit_2 REAL,
+            lots        REAL    NOT NULL,
+            risk_amount REAL    NOT NULL,
+            exit_reason TEXT    NOT NULL,
+            net_pnl     REAL    NOT NULL,
+            r_multiple  REAL    NOT NULL,
+            legs        TEXT    NOT NULL
+        ) WITHOUT ROWID;
+        CREATE INDEX idx_scalp_trades_exit ON scalp_trades (exit_time);
+        CREATE TABLE scalp_live_trades (
+            id          TEXT PRIMARY KEY,
+            direction   TEXT    NOT NULL,
+            session     TEXT,
+            score       REAL    NOT NULL,
+            signal_time INTEGER NOT NULL,
+            fill_time   INTEGER NOT NULL,
+            exit_time   INTEGER NOT NULL,
+            fill_price  REAL    NOT NULL,
+            stop_loss   REAL    NOT NULL,
+            take_profit_1 REAL  NOT NULL,
+            take_profit_2 REAL,
+            lots        REAL    NOT NULL,
+            risk_amount REAL    NOT NULL,
+            exit_reason TEXT    NOT NULL,
+            net_pnl     REAL    NOT NULL,
+            r_multiple  REAL    NOT NULL,
+            legs        TEXT    NOT NULL
+        ) WITHOUT ROWID;
+        CREATE INDEX idx_scalp_live_trades_exit ON scalp_live_trades (exit_time);
+        """,
+    ),
 )
 
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]

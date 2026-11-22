@@ -582,10 +582,10 @@ def test_run_paper_starts_and_stops(settings: Settings, monkeypatch: pytest.Monk
     assert "⏹ GoldSweep PAPER stopped." in text
     assert jobs == [
         "bar_job",
+        "scalper_job",  # the scalper, every minute (D111)
         "news_tick",
         "daily_summary",
         "dashboard_job",
-        "tick_job",  # the tick recorder (D106)
-        "heartbeat_job",
+        "heartbeat_job",  # no tick_job: the recorder is off (D111)
         "housekeeping_job",
     ]

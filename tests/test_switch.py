@@ -85,64 +85,55 @@ def test_mode_answers_and_refusals(settings: Settings, db: Database) -> None:
 
 def test_scalper_modes_that_are_not_built_do_nothing(settings: Settings, db: Database) -> None:
     h = Harness(settings, db)
-    reply = say(h, "scalper", "tick")
+    reply = say(h, "scalper", "swing")
     assert reply == (
-        "✅ Scalper mode: tick (seconds to two minutes): selected, not built yet (phase S5): "
-        "nothing runs. The scalper may not trade while /mode is main."
+        "✅ Scalper mode: swing scalping (M15, hours to two days): selected, not built yet "
+        "(phase S6): nothing runs. The scalper may not trade while /mode is main."
     )
-    assert db.get_state(SCALPER_MODE_KEY) == "tick"
-    assert "scalper: tick (seconds to two minutes): selected, not built yet" in h.trader.status()
+    assert db.get_state(SCALPER_MODE_KEY) == "swing"
+    assert "scalper: swing scalping (M15, hours to two days): selected, not built" in (
+        h.trader.status()
+    )
     h.trader = h.make()  # a restart keeps the choice
-    assert h.trader.scalper_mode == "tick"
-    assert "Its tick mode is not built yet (phase S5)" in say(h, "mode", "both")
-    assert say(h, "scalper", "hft").startswith("Send /scalper off")
+    assert h.trader.scalper_mode == "swing"
+    assert "Its swing mode is not built yet (phase S6)" in say(h, "mode", "both")
+    assert say(h, "scalper", "tick").startswith("Send /scalper off")  # renamed hft (D111)
     assert say(h, "scalper", "off") == "✅ Scalper off: no scalper mode runs."
     assert say(h, "scalper").startswith("Scalper mode: off.")
 
 
-def test_approving_a_scalper_mode_needs_its_evidence(
-    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_approving_a_scalper_mode_on_a_paper_bot(settings: Settings, db: Database) -> None:
     h = Harness(settings, db)
-    assert say(h, "approve", "scalper tick") == (
-        "The tick mode is not built yet (phase S5): nothing to approve."
+    assert say(h, "approve", "scalper intraday") == (
+        "The intraday mode is not built yet (phase S6): nothing to approve."
     )
-    assert say(h, "approve", "scalper hft") == "Send /approve scalper tick, intraday or swing."
-    built = dataclasses.replace(modes.REGISTRY["swing"], built=True)
-    monkeypatch.setitem(modes.REGISTRY, "swing", built)
-    assert say(h, "approve", "scalper swing").startswith("Not approved: the swing mode has not")
-    say(h, "scalper", "swing")
-    assert "swing (days to weeks): paper" in h.trader.status()
-    monkeypatch.setitem(modes.REGISTRY, "swing", dataclasses.replace(built, passed=True))
-    assert say(h, "approve", "scalper swing").startswith("✅ The scalper's swing mode is approved")
-    assert db.get_state(SCALPER_APPROVED_KEY) == ["swing"]
-    assert "swing (days to weeks): trading" in h.trader.status()
+    assert say(h, "approve", "scalper tick") == "Send /approve scalper hft, intraday or swing."
+    assert "Its hft mode runs on paper until /approve scalper hft." in (
+        say(h, "scalper", "hft") + say(h, "mode", "both")
+    )
+    assert "scalper: HFT (M1, seconds to 15 minutes): on paper" in h.trader.status()
+    assert say(h, "approve", "scalper hft").startswith(
+        "✅ The scalper's hft mode sends its orders to paper (this bot trades on paper only)"
+    )
+    assert db.get_state(SCALPER_APPROVED_KEY) == ["hft"]
+    assert "on paper" in h.trader.status()  # a paper bot has no demo account to send to
+    assert say(h, "revoke", "scalper hft").startswith("↩️ The scalper's hft mode is back on paper")
+    assert db.get_state(SCALPER_APPROVED_KEY) == []
+    assert say(h, "revoke", "scalper hft").startswith("The hft mode was not approved")
     # A session playbook approval still works as before (no monitored trades yet here).
     assert say(h, "approve", "london").startswith("Not approved: the London A+ playbook needs 20")
 
 
 def test_mode_states() -> None:
-    assert modes.mode_state("tick", selected="off", approved=False) == modes.OFF
-    assert modes.mode_state("tick", selected="tick", approved=True) == modes.NOT_BUILT
+    assert modes.mode_state("hft", selected="off", approved=False) == modes.OFF
+    assert modes.mode_state("hft", selected="hft", approved=False) == modes.PAPER
+    assert modes.mode_state("hft", selected="hft", approved=True) == modes.DEMO
+    assert modes.mode_state("swing", selected="swing", approved=True) == modes.NOT_BUILT
     assert modes.describe("swing", selected="intraday", approved=False) == (
-        "swing (days to weeks): off"
+        "swing scalping (M15, hours to two days): off"
     )
-    # S3 (D109): the intraday mode was tested and failed, so it does not run.
-    assert modes.describe("intraday", selected="intraday", approved=False) == (
-        "intraday (flat by the New York close): selected, but its three rules failed their "
-        "evidence test in S3 (D109): nothing runs"
-    )
-
-
-def test_a_failed_mode_says_so(settings: Settings, db: Database) -> None:
-    h = Harness(settings, db)
-    say(h, "scalper", "intraday")
-    assert say(h, "mode", "both").endswith(
-        "Its intraday mode does not run: its three rules failed their evidence test in S3 (D109)."
-    )
-    assert say(h, "approve", "scalper intraday") == (
-        "Not approved: the intraday mode does not run (its three rules failed their evidence "
-        "test in S3 (D109))."
+    assert modes.describe("hft", selected="hft", approved=True) == (
+        "HFT (M1, seconds to 15 minutes): on the demo account"
     )
 
 

@@ -10,18 +10,34 @@ apply (the prompt assumes a "section 7c" and files that never existed here). It 
 alongside the main strategy, never instead of it. Never copy the third-party product
 it shows (name, mascot, logo, artwork); the `reference/` folder stays out of git.
 Its logic is `goldsweep/scalping/` (one closed bar at a time, like the main engine);
-its position rules are the trade book's `Management` (shared, so S2's live executor
-must use the same functions). S1 found it loses after costs (D101): it stays off.
-The next plan (`docs/SCALPER_MODES.md`, D102-D107) gives it tick, intraday and swing
-modes behind a switch; no mode trades before its evidence gate and `/approve`, and
-latency arbitrage, news spikes, grids, martingale, hedging and stacking are never built.
+its position rules are the trade book's `Management`, applied by the paper book and by
+`MT5Executor._manage` with the same functions. S1 found it loses after costs (D101).
+`docs/SCALPER_MODES.md` (D102-D107) gave it modes behind a switch; D111 replaced the
+evidence gate with paper then demo testing. Latency arbitrage, news spikes, grids,
+martingale, hedging and stacking are never built.
 - **The switch** (S2, D108): `config.yaml switch:` gives the defaults, `/mode` and
   `/scalper` (Telegram, or `mode:<x>` / `scalper:<x>` dashboard commands) change them,
-  stored as `switch.*` state. `scalping/modes.py::REGISTRY` says which modes are built
-  and passed; flip `built` / `passed` only in the phase that builds and tests a mode.
-- **Ticks** (D106): `TickRecorder` saves each finished hour to
-  `data/ticks/<symbol>/<YYYY-MM-DD>/<HH>.npz` (UTC ms, bid, ask); read them with
-  `load_ticks`. Brokers serve ticks through `BrokerClient.get_ticks` (true UTC).
+  stored as `switch.*` state. `scalping/modes.py::REGISTRY` says which modes are built;
+  flip `built` only in the phase that builds a mode.
+- **Scalper v3** (D111, plan `docs/SCALPER_MODES.md` + D111): HFT on M1 (S5), intraday
+  on M5 and swing scalping on M15 (S6). The owner tests every built mode on paper, then
+  on the demo account: backtests are reported, not gates. A selected mode runs on the
+  scalper's own paper book (`scalper.paper.book`, table `scalp_trades`, notional
+  `scalper.paper_balance`); `/approve scalper <mode>` sends it to the demo account
+  through its own `MT5Executor` (magic `scalper.magic_number`, state `scalper.live.book`,
+  table `scalp_live_trades`, comments `GS-SC|<id>|<n>`); `/revoke scalper <mode>` returns
+  it to paper. Real accounts also need `data/scalp_forward_test_ok.json` (D93).
+  `scalping/runner.py::ScalperRunner` is fed each minute by `Trader.scalper_job` (under
+  the lock): every closed M1 bar goes to the engine and to both scalper executors (the
+  step line), and a setup on the newest bar passes the gates (mode, session, activity,
+  one scalp at a time, cooldown, cost gate, `risk/account_guard.py` when it shares the
+  demo account with the main strategy, then the executor's risk checks). No opposite
+  positions: a main order first closes an opposite demo scalp (`Trader._yield_scalps`).
+  The kill switch closes scalps too; `/golive` arms both executors.
+- **Ticks** (D106): off since D111 (`ticks.record: false`); the code stays.
+  `TickRecorder` saves each finished hour to `data/ticks/<symbol>/<YYYY-MM-DD>/<HH>.npz`
+  (UTC ms, bid, ask); read them with `load_ticks`. Brokers serve ticks through
+  `BrokerClient.get_ticks` (true UTC).
 - **Costs:** this account charges no commission (D108); the built-in default stays
   7.00 a lot for other accounts. Order round trips are timed (`order_log.elapsed_ms`).
 - **Flat-by** (S3, D109): `TradePlan.close_by` closes a position at the first bar close

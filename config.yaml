@@ -298,30 +298,34 @@ confluence:
     symbol_candidates: [XAGUSD, XAGUSD.m, XAGUSDm, SILVER]
     lookback_bars: 24
 
-# Which strategies may open trades, and the scalper's mode (D103). These are the
+# Which strategies may open trades, and the scalper's mode (D103, D111). These are the
 # startup defaults; /mode and /scalper on Telegram (or the dashboard) change them
-# while the bot runs. A scalper mode trades only after its evidence test and
-# /approve scalper <mode>; until then it runs on paper, and unbuilt modes do nothing.
+# while the bot runs. A selected mode runs on paper; /approve scalper <mode> sends its
+# orders to the demo account; unbuilt modes do nothing.
 switch:
   strategies: main               # main | scalper | both
-  scalper_mode: "off"            # "off" | tick | intraday | swing (quote "off")
+  scalper_mode: "off"            # "off" | hft | intraday | swing (quote "off")
 
 # The tick recorder (D106): every gold tick from the broker, saved in data/ticks/
-# (about 0.3 MB a busy hour, 5-8 MB a trading day), to test the tick mode on ticks
-# of our own.
+# (about 0.3 MB a busy hour). Off: the owner set it aside (D111); true turns it back on.
 ticks:
-  record: true
+  record: false
   keep_days: 0                   # 0 keeps every day
 
-# The scalper add-on's settings (docs/SCALPER_SPEC.md, docs/SCALPER_MODES.md, D88-D107).
-# It runs alongside the main strategy, never instead of it. S1's rules lost after
-# costs (D101); they are the intraday mode's first candidate.
+# The scalper add-on's settings (docs/SCALPER_SPEC.md, docs/SCALPER_MODES.md, D88-D111).
+# It runs alongside the main strategy, never instead of it. The HFT mode (S5, D111)
+# trades S1's two rules on M1 bars in the active sessions: on paper, then on the demo
+# account after /approve scalper hft. Its backtest (the "hft" line) is reported, not a gate:
 # python -m goldsweep.scalping.backtest --from 2024-01-01 --to 2026-10-31
 scalper:
   timeframe: M1
-  strategy: sweep_reclaim        # sweep_reclaim | trail_rejection
-  sessions: [asia, london, newyork, overlap]
-  htf_filter: true               # only with the H1 bias (or when it is neutral)
+  strategy: sweep_reclaim        # sweep_reclaim | trail_rejection (HFT runs both, D111)
+  sessions: [london, newyork, overlap]   # the active sessions the HFT mode trades
+  magic_number: 7341927          # its own number at the broker (main: execution.magic_number)
+  paper_balance: 10000           # the scalper's paper book (notional)
+  activity_min: 1.0              # HFT: M1 ATR at least its median of the last...
+  activity_bars: 1440            # ...1440 M1 bars (a day)
+  htf_filter: true               # S1 backtest variants only; the HFT mode drops it (D111)
   atr_period: 14
   step_trail: {atr_period: 10, multiplier: 2.0}
   swing_bars: 2                  # bars each side that confirm a micro swing
@@ -346,8 +350,9 @@ scalper:
     time_stop_min_r: 0.3
     max_spread_multiple: 1.5
     cost_multiple: 2.0           # TP1 at least 2x the round-trip cost away
-  # The intraday mode (S3, D109): M5 entries, flat by the New York rollover. All three
-  # rules failed their evidence test on 2024-2026, so the mode does not run.
+    max_open_risk_pct: 0.75      # both strategies' open risk together (account guard)
+  # The intraday rules of S3 (D109): M5 entries, flat by the New York rollover. They
+  # lost after costs on 2024-2026; the intraday mode is rebuilt on M5 in S6 (D111).
   # python -m goldsweep.scalping.intraday_backtest --from 2024-01-01 --to 2026-10-31
   intraday:
     rules: [asian_breakout, opening_range, vwap_trend]
