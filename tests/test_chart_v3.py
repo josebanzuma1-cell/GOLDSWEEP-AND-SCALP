@@ -345,6 +345,10 @@ def test_the_indicator_v3() -> None:
         "SendNotification",  # phone alerts, when switched on
         "Quick Scalp",
         "STALE",
+        # After a click the buttons show the state asked for (a second Pause click
+        # sends Resume); an older scalp.json does not undo it until a later one comes.
+        "void Expect(const string command)",
+        "g_pending_gmt",
     ):
         assert feature in source
     for page in ("Market", "Levels", "Setups", "Scalper", "Today", "Brief"):

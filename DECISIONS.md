@@ -2010,7 +2010,11 @@ GoldSweep's (prompt section 3), with a small "◆ GoldSweep" mark.
     loads.
 - **Buttons** (`PANEL_COMMANDS`): pause / resume, `mode:main|scalper|both`,
   `scalper:off|hft|intraday|swing`, the same switches as Telegram, each carried out once
-  and only within two minutes. The kill switch, `/approve` and every risk number stay off
+  and only within two minutes. After a click the buttons show the state just asked for,
+  so a second click on Pause sends Resume (v2 sent Pause four times in a row on the
+  owner's chart). A `scalp.json` written before the bot read the click does not undo
+  that; the first copy written 5 s or more after it, or any copy after 3 minutes, has
+  the last word. The kill switch, `/approve` and every risk number stay off
   the chart: a chart setting can never raise risk. The unanswered question of what MT5
   may configure took this safer side (CLAUDE.md); parameters such as risk % can be added
   if the owner asks.

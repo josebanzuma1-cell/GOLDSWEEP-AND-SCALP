@@ -128,6 +128,8 @@ string   g_strategies     = "main";
 long     g_updated_gmt    = 0;
 int      g_clicks         = 0;
 int      g_page           = 0;
+long     g_pending_gmt    = 0;   // when a switch was sent (0: none waiting)
+string   g_pending_text   = "";  // which one
 string   g_seen[];
 bool     g_first_load     = true;
 
@@ -193,8 +195,35 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
       command = "resume";
    ObjectSetInteger(0, sparam, OBJPROP_STATE, false);
    if(SendCommand(command))
-      ObjectSetString(0, sparam, OBJPROP_TEXT, "sent");
+      Expect(command);
    ChartRedraw(0);
+  }
+
+//+------------------------------------------------------------------+
+//| After a click the buttons show the state just asked for, so a    |
+//| second click on Pause sends Resume. scalp.json is rewritten once  |
+//| a minute: until a copy written after the click arrives, its older |
+//| state does not overwrite this one. The bot's next copy always has |
+//| the last word (it says what really happened).                    |
+//+------------------------------------------------------------------+
+void Expect(const string command)
+  {
+   g_pending_gmt = (long)TimeGMT();
+   g_pending_text = command;
+   if(command == "pause")
+      g_state = "paused";
+   else
+      if(command == "resume")
+         g_state = "active";
+      else
+         if(StringFind(command, "mode:") == 0)
+            g_strategies = StringSubstr(command, 5);
+         else
+            if(StringFind(command, "scalper:") == 0)
+               g_mode = StringSubstr(command, 8);
+   if(InpShowDashboard && g_scalp_count > 0)
+      Dashboard(g_scalp[0]);
+   DrawAnalysis();
   }
 
 //+------------------------------------------------------------------+
@@ -627,10 +656,19 @@ void DrawScalper()
    if(g_scalp_count == 0)
       return;
    string head = g_scalp[0];
-   g_state = JsonString(head, "state");
-   g_mode = JsonString(head, "mode");
-   g_strategies = JsonString(head, "strategies");
    g_updated_gmt = (long)JsonNumber(head, "updated_gmt");
+   // A copy written before the bot carried out the last click (it reads clicks every
+   // 2 s) would show the old state: keep the clicked one until a later copy arrives.
+   bool lagging = g_pending_gmt > 0 && g_updated_gmt < g_pending_gmt + 5 &&
+                  (long)TimeGMT() < g_pending_gmt + 180;
+   if(!lagging)
+     {
+      g_state = JsonString(head, "state");
+      g_mode = JsonString(head, "mode");
+      g_strategies = JsonString(head, "strategies");
+      g_pending_gmt = 0;
+      g_pending_text = "";
+     }
    string series = "";
    datetime previous_time = 0;
    double previous_value = 0.0;
@@ -797,6 +835,11 @@ void Dashboard(const string head)
       Button(SPREFIX + "cmd_scalper_hft", CORNER_LEFT_LOWER, bx + 338, by, 44, 17, "HFT", g_mode == "hft");
       Button(SPREFIX + "cmd_scalper_intraday", CORNER_LEFT_LOWER, bx + 386, by, 64, 17, "Intraday", g_mode == "intraday");
       Button(SPREFIX + "cmd_scalper_swing", CORNER_LEFT_LOWER, bx + 454, by, 52, 17, "Swing", g_mode == "swing");
+      if(g_pending_gmt > 0)
+         Label(SPREFIX + "dash_sent", CORNER_LEFT_LOWER, bx + 512, by - 2, "sent: " + g_pending_text,
+               clrSilver, 7);
+      else
+         ObjectDelete(0, SPREFIX + "dash_sent");
      }
    string side = JsonString(head, "trend");
    string side_name = (side == "UP") ? "BULLISH" : (side == "DOWN" ? "BEARISH" : "FLAT");
