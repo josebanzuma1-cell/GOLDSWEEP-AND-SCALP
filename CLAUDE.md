@@ -43,9 +43,18 @@ martingale, hedging and stacking are never built.
   comes from the plan id. `scalping/chart.py::ScalpPanel` writes `scalp.json` beside
   `signals.json` each scalper minute (head line, then one item per line, ASCII, CRLF,
   chart-clock times plus `updated_gmt`) and reads `scalp_commands.json`; the bot carries
-  out only `PANEL_COMMANDS` (pause, resume, scalper:off), each id once, at most two
-  minutes old. `mt5/GoldSweepPanel.mq5` v2 must never trade and writes only that
-  command file; compile it with MetaEditor (`MetaEditor64.exe /compile:<file> /log`).
+  out only `PANEL_COMMANDS` (pause, resume, `mode:*`, `scalper:*`; never stop, approve
+  or orders), each id once, at most two minutes old. `mt5/GoldSweepPanel.mq5` must never
+  trade and writes only that command file; compile it with MetaEditor
+  (`MetaEditor64.exe /compile:<file> /log`); `deploy/install-panel.ps1` installs it.
+- **Chart panel v3** (S8, D114): `signals.json` v2 (`execution/panel.py`) keeps every
+  v1 key on signal lines and adds `"k":"forming" | "pool" | "fvg"` lines and analysis
+  fields in the head; `scalp.json` v3 tags every item with its mode (`ChartMarks.lines`,
+  `boxes`) and carries `ModeSlot.decision`. File text goes through `ascii_text` (the
+  MQL5 reader stops at the first quote). Setups forming come from
+  `SignalEngine.forming()` and `grades.a_plus_possible`, which claims "A+ possible" only
+  from what is known before the signal. Never use the reference product's name,
+  emblem, mascot or purple artwork (a test checks the name).
 - **Ticks** (D106): off since D111 (`ticks.record: false`); the code stays.
   `TickRecorder` saves each finished hour to `data/ticks/<symbol>/<YYYY-MM-DD>/<HH>.npz`
   (UTC ms, bid, ask); read them with `load_ticks`. Brokers serve ticks through
@@ -207,6 +216,7 @@ python main.py --dashboard [--mock]         the Streamlit dashboard at http://lo
 python main.py --live --unattended          scheduled start: trades after /golive on Telegram
 python main.py --watchdog                   one check; Telegram alert if the bot is quiet
 powershell -ExecutionPolicy Bypass -File deploy\install-tasks.ps1 [-Paper] [-DryRun]
+powershell -ExecutionPolicy Bypass -File deploy\install-panel.ps1 [-DryRun]   chart panel into MT5
 ```
 
 Run them from the project's virtual environment (`.venv`).

@@ -96,6 +96,16 @@ class ScalpContext:
     equity: float = 0.0  # that account's equity, for the guard
 
 
+@dataclass(frozen=True, slots=True)
+class Decision:
+    """What the selected mode did on its latest bar (the chart's Quick Scalp line)."""
+
+    time: dt.datetime  # the signal bar's close (UTC)
+    signal: str  # BUY / SELL / NONE
+    text: str  # "placed <id> (paper)", "skipped: <why>", "no setup on the last bar"
+    rule: str = ""
+
+
 @dataclass
 class ModeSlot:
     """One mode: its logic, its paper book and (live) its demo executor."""
@@ -104,6 +114,7 @@ class ModeSlot:
     paper: Executor
     demo: Executor | None = None
     stopped_out: dict[Direction, dt.datetime] = field(default_factory=dict)
+    decision: Decision | None = None
 
     @property
     def name(self) -> str:
@@ -304,6 +315,8 @@ class ScalperRunner:
                         texts += self._report(slot, executor, events)
                 if warmup or i != newest or slot.name != context.mode:
                     continue
+                if not candidates:
+                    slot.decision = Decision(start + MINUTE, "NONE", "no setup on the last bar")
                 for candidate in candidates:
                     text = self._consider(slot, candidate, context, now)
                     if text:
@@ -326,28 +339,35 @@ class ScalperRunner:
     def _consider(
         self, slot: ModeSlot, candidate: Candidate, context: ScalpContext, now: dt.datetime
     ) -> str | None:
-        """Every gate, then the order. Returns the message for a placed scalp."""
-        if not context.may_open:
+        """Every gate, then the order. Returns the message for a placed scalp; the
+        outcome is kept in ``slot.decision`` either way (the chart's Quick Scalp line)."""
+        side = "BUY" if candidate.direction is Direction.LONG else "SELL"
+
+        def skip(reason: str) -> None:
+            slot.decision = Decision(candidate.time, side, f"skipped: {reason}", candidate.rule)
             return None
+
+        if not context.may_open:
+            return skip("the scalper may not trade now (/mode, pause or mode not built)")
         if now - candidate.time > STALE_AFTER:  # the job ran late: the moment has passed
             log.info("scalp skipped: the setup is stale", age=str(now - candidate.time))
-            return None
+            return skip("the setup is stale")
         executor = slot.target(context.demo)
         if self.busy(executor):
-            return None
+            return skip("a scalp of this mode is already open")
         gate = slot.logic.gate(candidate)
         if not gate.passed:
             log.info("scalp skipped", mode=slot.name, reason=gate.reason)
-            return None
+            return skip(gate.reason or "the mode's filters")
         stopped = slot.stopped_out.get(candidate.direction)
         cooldown = dt.timedelta(seconds=self._config.scalper.risk.cooldown_sec)
         if stopped is not None and candidate.time - stopped < cooldown:
-            return None
+            return skip("cooldown after a stop-out")
         try:
             spread = float(self._broker.spread_points(self.spec.name))
         except BrokerError as exc:
             log.warning("scalp skipped: no spread", error=str(exc))
-            return None
+            return skip("no spread from the broker")
         median = self._db.median_spread(
             self.spec.name, since=now - dt.timedelta(days=MEDIAN_SPREAD_DAYS), min_samples=30
         )
@@ -357,7 +377,7 @@ class ScalperRunner:
         )
         if made.plan is None:
             log.info("scalp skipped", mode=slot.name, reason=made.reason)
-            return None
+            return skip(made.reason)
         plan = made.plan
         if self._guard is not None and context.main_exposures is not None:
             risk = context.equity * self._config.scalper.risk.risk_per_scalp_pct / 100.0
@@ -371,16 +391,19 @@ class ScalperRunner:
             )
             if not decision.allowed:
                 log.info("scalp refused by the account guard", reasons=list(decision.reasons))
-                return None
+                return skip(decision.reasons[0] if decision.reasons else "the account guard")
         event = executor.submit(
             plan, spread_points=spread, median_spread_points=median, events=context.events
         )
         if event.kind is not EventKind.PLACED:
             log.info("scalp not placed", id=plan.id, detail=event.detail)
-            return None
+            return skip(event.detail or "not placed")
         self._count_id(plan.id)
         where = slot.where(executor)
         log.info("scalp placed", id=plan.id, where=where, rule=candidate.rule)
+        slot.decision = Decision(
+            candidate.time, side, f"placed {plan.id} ({where})", candidate.rule
+        )
         return messages.scalp_placed(plan, event, slot.name, where, candidate.reason)
 
     def _next_id(self, slot: ModeSlot, now: dt.datetime) -> str:

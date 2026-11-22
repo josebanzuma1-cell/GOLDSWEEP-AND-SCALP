@@ -31,7 +31,7 @@ review after each one.
 | 8 | Unattended running (Task Scheduler, /golive), heartbeat, watchdog, backups, VPS guide | built, tested, approved |
 | 9 | More trades and "sniper" entries: (1) entries that fill and never wait into a blocked time, (2) M1 refinement, (3) more setup models | built and tested: entries wait 2 hours (D82), M1 refinement left off (D83), breakeven only at TP1 (D84), new models alert only (D85) |
 | 10 | Session playbooks: A+ grades, per-session strategy from the evidence, monitoring before auto-trading | built, tested, approved: candidates from the analysis (D86), shadow-book monitoring, `/approve`, Asia on (D87) |
-| S | Scalper add-on alongside the main strategy (`docs/SCALPER_SPEC.md`): M1 scalps, step trail, three-child ladder, chart dashboard, MT5 assistant | S0 approved (Python engine, D89); S1 (logic, tests, first backtest) built: it loses after costs in every variant (D101), so it stays off. Research on tick ("HFT"), intraday and swing modes with a switch between them: `docs/SCALPER_MODES.md` (D102-D107), approved. S2 (the switch, the tick recorder, latency, costs; D108) approved. S3 (intraday mode) built and tested: all three rules lose after costs, so the mode does not run (D109), approved. S4 (swing mode: Donchian, momentum, pullback, swap charged) built and tested: negative over 2014-2022, positive only in the 2022-2026 rise, and a 0.01 lot needs about 76,000 at 0.25%; the mode does not run (D110), approved. Scalper v3 (D111): HFT on M1, intraday on M5, swing scalping on M15, each tested on paper then on the demo account (backtests reported, not gates); tick recorder off. S5 (HFT mode: runner, scalper paper book and demo executor with its own magic number, account guard, no opposite positions) built and tested; its backtest loses 0.12 R a scalp after costs (D111); approved, on paper then the demo account. S6 (intraday on M5, swing scalping on M15, one mode interface for the bot and the new mode backtest, a book and magic number per mode) built and tested: intraday -0.04 R a trade after costs (flat before), swing scalping -0.07 R (D112); approved. S7 (chart panel v2 from `scalp.json` with Pause / Resume / Scalper off buttons, the dashboard's Scalper tab, Telegram `/stats`; D113) built, tested and approved |
+| S | Scalper add-on alongside the main strategy (`docs/SCALPER_SPEC.md`): M1 scalps, step trail, three-child ladder, chart dashboard, MT5 assistant | S0 approved (Python engine, D89); S1 (logic, tests, first backtest) built: it loses after costs in every variant (D101), so it stays off. Research on tick ("HFT"), intraday and swing modes with a switch between them: `docs/SCALPER_MODES.md` (D102-D107), approved. S2 (the switch, the tick recorder, latency, costs; D108) approved. S3 (intraday mode) built and tested: all three rules lose after costs, so the mode does not run (D109), approved. S4 (swing mode: Donchian, momentum, pullback, swap charged) built and tested: negative over 2014-2022, positive only in the 2022-2026 rise, and a 0.01 lot needs about 76,000 at 0.25%; the mode does not run (D110), approved. Scalper v3 (D111): HFT on M1, intraday on M5, swing scalping on M15, each tested on paper then on the demo account (backtests reported, not gates); tick recorder off. S5 (HFT mode: runner, scalper paper book and demo executor with its own magic number, account guard, no opposite positions) built and tested; its backtest loses 0.12 R a scalp after costs (D111); approved, on paper then the demo account. S6 (intraday on M5, swing scalping on M15, one mode interface for the bot and the new mode backtest, a book and magic number per mode) built and tested: intraday -0.04 R a trade after costs (flat before), swing scalping -0.07 R (D112); approved. S7 (chart panel v2 from `scalp.json` with Pause / Resume / Scalper off buttons, the dashboard's Scalper tab, Telegram `/stats`; D113) built, tested and approved. S8 (chart panel v3: graded signals in the reference layout, setups forming with "A+ possible", pools and gaps, each scalper mode's layer, analysis box, switch buttons, chart theme, A+ alerts, `deploy\install-panel.ps1`; D114) built and tested; awaiting approval |
 
 Only `python main.py --live` sends orders to a broker, and only after
 `MODE=LIVE` in `.env`, `mode: LIVE` in `config.yaml` and the account number typed
@@ -346,35 +346,78 @@ by hand are never touched (except by `/stop`, which only closes GoldSweep's).
 
 ### The chart panel (GoldSweepPanel.mq5)
 
-While the bot runs (paper or live) it writes the recent signals to
-`signals.json` in MetaTrader 5's shared `Common\Files\GoldSweep` folder. The
-indicator `mt5/GoldSweepPanel.mq5` draws them on the gold chart: a BUY/SELL label
-with the score, the entry, stop-loss and TP1/TP2/TP3 lines, a shaded risk box and
-reward box, and the swept level, plus a corner box with the mode, the trading
-state, the pressure estimate and the news bias.
+While the bot runs (paper or live) it writes two files to MetaTrader 5's shared
+`Common\Files\GoldSweep` folder: `signals.json` after every M5 bar and `scalp.json`
+every minute. The indicator `mt5/GoldSweepPanel.mq5` (version 3, S8, D114) draws
+them on the gold chart in the GoldSweep look:
 
-Version 2 (S7, D113) also draws the scalper from `scalp.json`, which the bot
-rewrites every minute: the HFT step-trail line and its sweep "x" markers; each
-recent scalp's box with SL / ENTRY / TP1-TP3 labels, "TP1/TP2/TP3" where a target
-was reached and the result (+R / -R) once it closed; and, bottom-left, the
-scalper's dashboard: mode and PAPER/DEMO badge, status (READY, IN TRADE, PAUSED,
-OFF), the market (trend, ATR, session, spread against its median, the next news
-release), the open scalp (entry, stop, targets reached, R, parts left, minutes)
-and the results after costs for today and 30 days with the break-even win rate.
-It shows STALE when the file has not been rewritten for three minutes. Its three
-buttons, Pause / Resume and Scalper off, write one line to `scalp_commands.json`
-that the bot carries out within a few seconds (and reports on Telegram); that file
-is the only thing the indicator writes. It never trades.
+- **Signals**: a tag such as `SELL A+ 82` (gold for A+), the trade box with its risk
+  and reward zones, `ENTRY / SL / TP1 / TP2 / TP3` labelled at the box's edge, an "x"
+  at the sweep's extreme, the status, tags and playbook, and `+2.10 R (tp2)` once the
+  trade closed. The "Lowest grade drawn" setting picks A+ only, A and A+, or all.
+- **Upcoming setups**: a raid that has swept a pool but is not a signal yet is marked
+  `FORMING BUY: Asian low 2027.00 | swept: waiting for the structure shift`, in gold
+  with "A+ possible" when the session's A+ rule can still be met. It is a mark to
+  watch, not an order; many raids never become signals.
+- **Levels**: the nearest liquidity pools above and below price, and open fair value
+  gaps.
+- **Scalper**: the HFT step line and its "x" marks, each scalp's box with TP hits and
+  result, and the selected mode's own layer (intraday: VWAP, Asian and New York
+  opening ranges; swing: the M15 20 EMA, its 20-bar channel, Asian and London
+  ranges).
+- **Dashboard** (bottom-left): mode and PAPER/DEMO badge, buttons, the status and
+  "Quick Scalp" line (what the selected mode did on its last bar and why), the market,
+  the open scalp and the results after costs. It shows STALE when the bot stops
+  rewriting its file.
+- **Analysis box** (top-left), with page buttons:
+  - **Market**: H1 bias, news bias, pressure estimate, session and next window, next
+    release;
+  - **Levels**: the nearest pools and gaps;
+  - **Setups**: what is forming and the last signals;
+  - **Scalper**: every mode's status;
+  - **Today**: results;
+  - **Brief**: the latest scenario brief, written by the AI as text only.
+- **Alerts**: a pop-up and sound (and, if you switch it on, a push to the MT5 phone
+  app) for each new A+ signal and each new setup that can still be A+.
+- **Buttons**: Pause/Resume; Trade: Main / Scalper / Both; Scalper: Off / HFT /
+  Intraday / Swing. They write one line to `scalp_commands.json`, which the bot
+  carries out within a few seconds and reports on Telegram. That file is the only
+  thing the indicator writes. It never trades, and the kill switch and `/approve`
+  stay on Telegram and the dashboard.
+- **Theme**: on by default, the charcoal background with off-white and gold candles,
+  and the tick-volume histogram. Your own colours come back when you remove the
+  indicator.
 
-To install it once (or to update it to a new version):
+#### Load it in MetaTrader 5
 
-1. In MetaTrader 5: File > Open Data Folder, then open `MQL5\Indicators`.
-2. Copy `mt5\GoldSweepPanel.mq5` from this project into that folder.
-3. In MetaTrader 5, open the Navigator (Ctrl+N), right-click Indicators and choose
-   Refresh, then double-click `GoldSweepPanel` (or drag it onto the XAUUSD chart)
-   and press OK. MetaTrader compiles it the first time.
+1. Start the bot (`Start GoldSweep LIVE.cmd` or `--paper`): it writes the files the
+   panel reads.
+2. Install it. Either run
+   `powershell -ExecutionPolicy Bypass -File deploy\install-panel.ps1`, which copies it
+   into every MT5 terminal on this PC, keeps the old one as `GoldSweepPanel.prev.mq5`
+   and compiles it (`-DryRun` only shows what it would do). Or, by hand, in MetaTrader
+   5 use File > Open Data Folder, open `MQL5\Indicators` and copy
+   `mt5\GoldSweepPanel.mq5` there.
+3. In MetaTrader 5 open the Navigator (Ctrl+N), right-click **Indicators** and choose
+   **Refresh**.
+4. Open an XAUUSDm chart: M1 for HFT, M5 for the main strategy and intraday, M15 for
+   swing. Drag **GoldSweepPanel** onto it. If an older version is already on the
+   chart, it reloads by itself after step 2.
+5. In the **Inputs** tab choose what to see. The groups are Files, Chart theme, Main
+   strategy (lowest grade, forming setups, pools, gaps), Scalper (layers: the
+   selected mode, all or none), Panels, Alerts and Colours. No DLLs and no WebRequest
+   are needed. Press OK.
+6. Keep the layout: Charts > Template > Save Template, name it `GoldSweep` (or
+   `default` so every new chart opens with it).
+7. For alerts on your phone: install MetaTrader 5 on the phone, copy its MetaQuotes
+   ID (Settings > Chat and messages), enter it on the PC under Tools > Options >
+   Notifications, then set the panel's input **Also to the MT5 phone app** to true.
 
-Choices are explained in `DECISIONS.md` (D56-D66).
+If the panel says "waiting for signals.json", the bot is not running or has not
+finished a bar yet. If the dashboard says STALE, the bot has stopped writing; check
+its window. The panel draws only on gold charts (XAUUSD / GOLD).
+
+Choices are explained in `DECISIONS.md` (D56-D66, D99, D113, D114).
 
 ## Dashboard (Phase 7)
 

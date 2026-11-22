@@ -108,7 +108,11 @@ def test_a_signal_becomes_real_orders_with_stops(
     assert db.query("SELECT action FROM signals") == [("traded",)]
 
     panel = json.loads((tmp_path / "panel" / "signals.json").read_text(encoding="ascii"))
-    (shown,) = panel["signals"]
+    (shown,) = [item for item in panel["signals"] if "id" in item]  # v2 adds pools, gaps
+    kinds = {item["k"] for item in panel["signals"] if "k" in item}
+    assert "pool" in kinds and shown["grade"] == "A+"  # the London Judas raid (D86)
+    assert (shown["sweep_x"], shown["model"]) == (2026.4, "sweep_mss")
+    assert panel["version"] == 2 and panel["h1"] in ("LONG", "SHORT", "NEUTRAL")
     assert (panel["mode"], shown["id"], shown["dir"], shown["status"]) == (
         "LIVE DEMO",
         "2026-11-17-LDN-01",
@@ -288,7 +292,7 @@ def test_panel_file_layout(db: Database, tmp_path: Path) -> None:
     )
     text = writer.path.read_text(encoding="ascii")
     lines = text.splitlines()
-    assert lines[0].startswith('{"version":1,"mode":"PAPER","state":"active"')
+    assert lines[0].startswith('{"version":2,"mode":"PAPER","state":"active"')  # v2 (D114)
     assert lines[1].startswith('{"id":"2026-11-18-NY-01"')  # one signal per line
     data = json.loads(text)
     (signal,) = data["signals"]

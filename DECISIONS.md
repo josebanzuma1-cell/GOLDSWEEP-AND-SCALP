@@ -1954,3 +1954,76 @@ dashboard's Scalper tab; Telegram `/stats`):
 phase if the owner wants it; Telegram chart snapshots (PNG) are not sent, the
 dashboard shows the same picture; "twin bars" brackets and trend lines are not drawn
 (the engine uses twin-bar levels; the step line and the boxes carry the trade).
+
+### D114. S8: chart panel v3, the trading picture inside MetaTrader 5
+
+**The owner's request (2026-11-22):** make GoldSweep configurable inside MT5 like the
+reference chart they sent (the third-party product of D98), with design, strategy and
+order indicators on the chart, chart analysis, every upcoming signal and above all A+
+setups, and steps to load it.
+
+**Branding:** the reference's layout and behaviour are followed: the dark chart, BUY/SELL
+tags, the trade box with right-aligned SL / ENTRY / TP1-TP3 labels and dashed TPs, the
+stepped trail, the "x" at the sweep, TP-hit marks, the dashboard and a settings window.
+Its robot artwork, purple theme, emblem and name are not used (D98). The look is
+GoldSweep's (prompt section 3), with a small "◆ GoldSweep" mark.
+
+**Built:**
+
+- **Setups forming** (`SignalEngine.forming(trigger)`): every pool the engine has pierced,
+  swept or shifted but that is not a signal yet, with its side, stage, since when, the
+  raid's extreme and whether it went beyond the New York midnight open (the Judas
+  reference, now `ny_midnight_open`, shared with the signal's own tag). Read-only.
+- **"A+ possible"** (`grades.a_plus_possible`): the current session's candidate rule can
+  still be met. Only what is known before the signal counts: the model and Judas. A rule
+  that needs a tag the raid cannot show yet (SMT, a trend tag) gets no "possible", so
+  the chart never promises more than it knows. It is a watch mark, never an order.
+- **`signals.json` v2** (`execution/panel.py`): signal lines keep every v1 key and add
+  the grade, model, tags, playbook, the A+ monitoring flag, the sweep's extreme and
+  time, the statuses armed and closed, and the result. New lines are `"k":"forming"`
+  (A+ possible or not), `"k":"pool"` (the four nearest unswept pools above and below)
+  and `"k":"fvg"` (open gaps, `analysis.zones.open_gaps`, moved from the dashboard).
+  The head carries the analysis: H1 bias, news bias, pressure, session and window, next
+  release, approved playbooks, the main strategy's last 24 hours, and the latest
+  scenario brief. Text is plain ASCII without quotes: dashes and quotes are converted,
+  accents dropped.
+- **`scalp.json` v3** (`scalping/chart.py`): every mode's layer, tagged with its mode:
+  the HFT step line and sweeps; intraday VWAP, M5 sweeps and the Asian and NY opening
+  ranges; swing M15 EMA, the 20-bar channel and the Asian and London ranges
+  (`ChartMarks.lines` and `boxes`, small `ranges()` accessors on the engines). It also
+  carries the selected mode's latest decision (`ModeSlot.decision`: placed, skipped and
+  why, or no setup; the "Quick Scalp" line) and one status line per mode. On weekends
+  the session reads "closed" (the Tokyo window "opens" on Sundays).
+- **Indicator v3** (`mt5/GoldSweepPanel.mq5`, compiled in MetaEditor: 0 errors, 0
+  warnings):
+  - everything above, in grouped inputs (Files, Chart theme, Main strategy, Scalper,
+    Panels, Alerts, Colours);
+  - the lowest grade drawn: A+ only / A and A+ / all;
+  - mode layers: the selected mode / all / none;
+  - an analysis box with Market, Levels, Setups, Scalper, Today and Brief pages,
+    answered from the files, with no AI call;
+  - the dashboard with the Quick Scalp line;
+  - the chart theme, saved per chart in terminal global variables and restored when
+    the indicator is removed;
+  - an alert once per new A+ signal and per new "A+ possible" setup, by pop-up, sound
+    and an optional phone push; nothing is alerted for what is already there when it
+    loads.
+- **Buttons** (`PANEL_COMMANDS`): pause / resume, `mode:main|scalper|both`,
+  `scalper:off|hft|intraday|swing`, the same switches as Telegram, each carried out once
+  and only within two minutes. The kill switch, `/approve` and every risk number stay off
+  the chart: a chart setting can never raise risk. The unanswered question of what MT5
+  may configure took this safer side (CLAUDE.md); parameters such as risk % can be added
+  if the owner asks.
+- **`deploy/install-panel.ps1 [-DryRun]`**: finds every MT5 data folder (with
+  `origin.txt`), keeps the installed panel as `GoldSweepPanel.prev.mq5`, copies the new
+  one and compiles it with `MetaEditor64.exe /compile /log`. The README gives the steps
+  to load it, the inputs, phone alerts and troubleshooting.
+
+**Not built:** a free-text AI chat window in MT5. The latest AI brief is shown as text
+instead, and the AI still never trades. Twin-bar brackets and trend lines are also not
+drawn.
+
+**Checked here:** tests on hand-made bars for forming setups, A+ possible, both files,
+the buttons, the indicator's source (never trades, writes only its command file) and that
+the reference product's name appears nowhere but the owner's verbatim prompt. The chart
+itself is checked by the owner on screen: no screenshot can be taken from this session.

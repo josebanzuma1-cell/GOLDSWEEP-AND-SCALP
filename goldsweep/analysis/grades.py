@@ -24,7 +24,7 @@ from goldsweep.analysis.signals import POST_NEWS
 from goldsweep.core.clock import ASIA, LONDON, NEW_YORK, OVERLAP
 
 if TYPE_CHECKING:
-    from goldsweep.analysis.signals import Signal
+    from goldsweep.analysis.signals import FormingSetup, Signal
     from goldsweep.core.settings import PlaybookRule, PlaybooksConfig, SessionPlaybook
 
 PLAYBOOK_SESSIONS = ("asia", "london", "newyork")
@@ -98,6 +98,27 @@ def grade(signal: Signal, playbooks: PlaybooksConfig, *, neutral_extra: float) -
         if meets(signal, book.candidate, neutral_extra=neutral_extra):
             return "A+"
     return "A" if signal.meets_alert else "B"
+
+
+def a_plus_possible(forming: FormingSetup, playbooks: PlaybooksConfig, session: str | None) -> bool:
+    """Can this raid under way still become its session's A+ setup (S8, D114)?
+
+    Only what is known before the signal counts: the model and the Judas tag (the
+    raid went beyond the New York midnight open). A candidate that also needs a tag
+    the raid cannot show yet (SMT, a trend tag ...) gets no "possible", so the chart
+    never promises more than it knows; the score is checked when the signal forms.
+    """
+    name = playbook_session(session)
+    book: SessionPlaybook | None = getattr(playbooks, name) if name is not None else None
+    rule = book.candidate if book is not None else None
+    if rule is None or rule.model != forming.model:
+        return False
+    known = {"judas"} if forming.judas else set()
+    if rule.tags_all and not set(rule.tags_all) <= known:
+        return False
+    if rule.tags_any and not known.intersection(rule.tags_any):
+        return False
+    return len(known & CONFLUENCE) >= rule.min_tags
 
 
 def rule_conditions(rule: PlaybookRule) -> int:

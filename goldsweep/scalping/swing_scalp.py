@@ -120,6 +120,19 @@ class SwingScalpEngine:
     def line_at(self, close_ns: int) -> tuple[float, float]:
         return self.line_for(close_ns, True)
 
+    def ranges(self) -> list[tuple[str, dt.datetime, dt.datetime, float, float]]:
+        """Today's Asian and London ranges so far, for the chart:
+        (name, window start, window end, high, low)."""
+        if self._day is None:
+            return []
+        found: list[tuple[str, dt.datetime, dt.datetime, float, float]] = []
+        for name, label in ((ASIA, "Asian range"), (LONDON, "London range")):
+            box = self._today.ranges[name]
+            if box.bars:
+                start, end = self._span(name, self._day)
+                found.append((label, start, end, box.high, box.low))
+        return found
+
     # -- each bar ---------------------------------------------------------------------- #
 
     def _span(self, name: str, day: dt.date) -> tuple[dt.datetime, dt.datetime]:

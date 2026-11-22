@@ -118,8 +118,25 @@ class IntradayEngine:
         self._highs: deque[float] = deque(maxlen=self._cfg.swing_bars)
         self._vwaps: deque[float] = deque(maxlen=self._cfg.vwap_slope_bars + 1)
         self._previous_close: float | None = None
+        self._last_opened: dt.datetime | None = None
         self.vwap = math.nan
         self.atr: float | None = None
+
+    def ranges(self) -> list[tuple[str, dt.datetime, dt.datetime, float, float]]:
+        """Today's Asian range and New York opening range so far, for the chart:
+        (name, window start, window end, high, low)."""
+        if self._day is None or self._last_opened is None:
+            return []
+        found: list[tuple[str, dt.datetime, dt.datetime, float, float]] = []
+        asia = self._today.asia
+        if asia.bars:
+            start, end = self._span("asia", self._day)
+            found.append(("Asian range", start, end, asia.high, asia.low))
+        opening = self._today.opening
+        if opening.bars:
+            start, end = self._opening_window(self._last_opened)
+            found.append(("NY opening range", start, end, opening.high, opening.low))
+        return found
 
     # -- the clock ------------------------------------------------------------- #
 
@@ -149,6 +166,7 @@ class IntradayEngine:
     ) -> list[IntradaySetup]:
         """Apply one closed bar (``opened`` is its open time, UTC)."""
         self._index += 1
+        self._last_opened = opened
         day = opened.date()
         if day != self._day:
             self._day, self._today = day, _Day()

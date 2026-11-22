@@ -124,6 +124,48 @@ def in_silver_bullet(moment: dt.datetime) -> bool:
     return any(start <= local < end for start, end in SILVER_BULLET_WINDOWS)
 
 
+def ny_midnight_open(bars: pd.DataFrame, now: dt.datetime) -> float | None:
+    """The open of the bar that starts at midnight New York on the New York date of
+    ``now`` (the Judas reference, D85), or ``None`` when that bar is not in ``bars``."""
+    local = ensure_utc(now).astimezone(_NEW_YORK_TZ)
+    midnight = pd.Timestamp(
+        dt.datetime.combine(local.date(), dt.time(0), _NEW_YORK_TZ).astimezone(dt.UTC)
+    )
+    position = int(bars.index.searchsorted(midnight))
+    if position < len(bars) and bars.index[position] == midnight:
+        return float(bars["open"].iloc[position])
+    return None
+
+
+#: The stages of a raid that has not become a signal yet, as the chart names them.
+FORMING_STAGES = {
+    "pierced": "pierced: waiting for a close back inside",
+    "swept": "swept: waiting for the structure shift",
+    "shifted": "shifted: the entry gap completes on the next bar",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class FormingSetup:
+    """A raid of a liquidity pool on its way to becoming a signal (S8, D114).
+
+    It may still fail (no close back inside, no shift in time, price runs back
+    through the extreme): it is a mark to watch, not an order.
+    """
+
+    pool: Pool
+    direction: Direction  # the trade it would be
+    stage: str  # pierced / swept / shifted (see FORMING_STAGES)
+    since: dt.datetime  # open time of the bar that pierced the pool (UTC)
+    extreme: float | None  # the raid's furthest price so far
+    judas: bool  # the raid went beyond the New York midnight open
+    model: str
+
+    @property
+    def describe(self) -> str:
+        return FORMING_STAGES.get(self.stage, self.stage)
+
+
 @dataclass(frozen=True, slots=True)
 class ModelSpec:
     """How a setup model differs from the spec's sweep -> MSS -> gap model (D85)."""
@@ -357,6 +399,42 @@ class SignalEngine:
     @property
     def day_levels(self) -> DayLevels | None:
         return self._levels
+
+    def forming(self, trigger: pd.DataFrame) -> list[FormingSetup]:
+        """Raids under way: pools pierced, swept or shifted but not yet a signal.
+
+        ``trigger`` is the latest trigger bars (the extreme so far and the New York
+        midnight open are read from them). Read-only: nothing in the engine changes.
+        """
+        names = {_Stage.PIERCED: "pierced", _Stage.TRACKING: "swept", _Stage.AWAIT_ZONE: "shifted"}
+        found: list[FormingSetup] = []
+        last = trigger.index[-1].to_pydatetime() if len(trigger) else None
+        midnight_open = ny_midnight_open(trigger, last) if last is not None else None
+        for track in self._tracks.values():
+            stage = names.get(track.stage)
+            if stage is None or track.pierce_time is None:
+                continue
+            pool = track.pool
+            direction = pool.side.trade_direction
+            since = trigger.loc[trigger.index >= pd.Timestamp(track.pierce_time)]
+            extreme: float | None = None
+            if not since.empty:
+                extreme = (
+                    float(since["high"].max())
+                    if pool.side is Side.BUY_SIDE
+                    else float(since["low"].min())
+                )
+            judas = (
+                extreme is not None
+                and midnight_open is not None
+                and (midnight_open - extreme) * direction.sign > 0
+            )
+            found.append(
+                FormingSetup(
+                    pool, direction, stage, track.pierce_time, extreme, judas, self._model.name
+                )
+            )
+        return sorted(found, key=lambda f: f.since)
 
     @property
     def crt_setups(self) -> list[CrtSetup]:
@@ -968,15 +1046,9 @@ class SignalEngine:
             )
             if any(overlaps(zone, gap) for gap in against):
                 tags.append("bpr")
-        local = ensure_utc(now).astimezone(_NEW_YORK_TZ)
-        midnight = pd.Timestamp(
-            dt.datetime.combine(local.date(), dt.time(0), _NEW_YORK_TZ).astimezone(dt.UTC)
-        )
-        position = int(window.index.searchsorted(midnight))
-        if position < len(window) and window.index[position] == midnight:
-            midnight_open = float(window["open"].iloc[position])
-            if (midnight_open - sweep.extreme) * sign > 0:
-                tags.append("judas")  # the raid ran beyond the New York midnight open
+        midnight_open = ny_midnight_open(window, now)
+        if midnight_open is not None and (midnight_open - sweep.extreme) * sign > 0:
+            tags.append("judas")  # the raid ran beyond the New York midnight open
         if in_silver_bullet(bar_open):
             tags.append("silver_bullet")
         if components.get("fib", 0.0) > 0:

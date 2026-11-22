@@ -69,17 +69,27 @@ class Candidate:
 
 #: Step-line points kept for the chart (three hours of M1 bars).
 CHART_POINTS = 180
+#: Points kept of each M5 / M15 line for the chart (12 hours of M5, 24 of M15).
+LINE_POINTS = 144
+#: A drawn line: its name and (bar open, value) points.
+Line = tuple[str, tuple[tuple[dt.datetime, float], ...]]
+#: A drawn box: (name, start, end, high, low).
+Box = tuple[str, dt.datetime, dt.datetime, float, float]
 
 
 @dataclass(frozen=True, slots=True)
 class ChartMarks:
-    """A mode's picture for the chart panel: its trend, ATR, line and sweeps."""
+    """A mode's picture for the chart panel: its trend, ATR, lines, boxes and sweeps."""
 
     timeframe: str  # the mode's signal bars
     trend: str  # UP / DOWN / - (HFT: the step trail; intraday and swing: the H1 trend)
     atr: float | None  # on the signal bars
-    line: tuple[tuple[dt.datetime, float, int], ...] = ()  # (bar open, value, trend)
+    line: tuple[tuple[dt.datetime, float, int], ...] = ()  # HFT step line: (open, value, trend)
     sweeps: tuple[tuple[dt.datetime, float, str], ...] = ()  # (bar open, extreme, side)
+    #: The mode's own layer (S8): VWAP (intraday), EMA and channel (swing).
+    lines: tuple[Line, ...] = ()
+    #: Today's ranges: Asian and NY opening (intraday), Asian and London (swing).
+    boxes: tuple[Box, ...] = ()
 
 
 def _trend_name(direction: Direction | None) -> str:
@@ -355,6 +365,8 @@ class IntradayLogic(ModeLogic):
         self._rules = (
             IntradayEngine(self._cfg, sessions, bar=FIVE, rules=others) if others else None
         )
+        #: The VWAP after each M5 bar, for the chart.
+        self.vwap: deque[tuple[dt.datetime, float]] = deque(maxlen=LINE_POINTS)
 
     def on_bar(
         self,
@@ -400,13 +412,17 @@ class IntradayLogic(ModeLogic):
                             r,
                         )
                     )
+                if not math.isnan(self._rules.vwap):
+                    self.vwap.append((bar.opened, self._rules.vwap))
         return found
 
     def chart(self) -> ChartMarks:
         engine = self._sweeps or self._rules
         atr = engine.atr if engine is not None else None
         sweeps = tuple(self._sweeps.sweeps) if self._sweeps is not None else ()
-        return ChartMarks("M5", _trend_name(self.trend.direction), atr, (), sweeps)
+        lines: tuple[Line, ...] = (("VWAP", tuple(self.vwap)),) if self.vwap else ()
+        boxes = tuple(self._rules.ranges()) if self._rules is not None else ()
+        return ChartMarks("M5", _trend_name(self.trend.direction), atr, (), sweeps, lines, boxes)
 
     def gate(self, candidate: Candidate) -> Gate:
         gate = super().gate(candidate)
@@ -450,13 +466,24 @@ class SwingLogic(ModeLogic):
         self._m15 = BarAggregator(15)
         self.engine = SwingScalpEngine(self._cfg, sessions)
         self._weekend = config.sessions.weekend
+        #: The EMA and the trail's channel after each M15 bar, for the chart.
+        self.points: dict[str, deque[tuple[dt.datetime, float]]] = {
+            name: deque(maxlen=LINE_POINTS) for name in ("EMA", "channel low", "channel high")
+        }
 
     @property
     def line(self) -> StepLineSource:
         return self.engine
 
     def chart(self) -> ChartMarks:
-        return ChartMarks("M15", _trend_name(self.trend.direction), self.engine.atr)
+        lines = tuple((name, tuple(points)) for name, points in self.points.items() if points)
+        return ChartMarks(
+            "M15",
+            _trend_name(self.trend.direction),
+            self.engine.atr,
+            lines=lines,
+            boxes=tuple(self.engine.ranges()),
+        )
 
     def _close_by(self, moment: dt.datetime) -> dt.datetime:
         cfg = self._cfg.swing_scalp
@@ -492,6 +519,14 @@ class SwingLogic(ModeLogic):
                         s,
                     )
                 )
+            ema = self.engine.ema
+            if not math.isnan(ema):
+                self.points["EMA"].append((bar.opened, ema))
+            low_line, _ = self.engine.line_for(0, True)
+            high_line, _ = self.engine.line_for(0, False)
+            if not math.isnan(low_line):
+                self.points["channel low"].append((bar.opened, low_line))
+                self.points["channel high"].append((bar.opened, high_line))
         return found
 
     def gate(self, candidate: Candidate) -> Gate:

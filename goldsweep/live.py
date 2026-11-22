@@ -52,6 +52,7 @@ from goldsweep.analysis.bias import compute_bias
 from goldsweep.analysis.context import ContextFrames, with_context
 from goldsweep.analysis.grades import (
     PLAYBOOK_SESSIONS,
+    a_plus_possible,
     describe_rule,
     grade,
     meets,
@@ -70,6 +71,7 @@ from goldsweep.analysis.refine import (
 )
 from goldsweep.analysis.signals import MODELS, Signal, SignalEngine
 from goldsweep.analysis.smt import with_smt
+from goldsweep.analysis.zones import open_gaps
 from goldsweep.backtest.engine import spread_points as cost_spreads
 from goldsweep.backtest.simulator import TrailLevels
 from goldsweep.core.clock import UTC, Clock, SessionCalculator, SystemClock, ensure_utc
@@ -155,6 +157,8 @@ SCALPER_APPROVED_KEY = "scalper.approved"
 STRATEGY_CHOICES = ("main", "scalper", "both")
 #: The last chart-panel command carried out (S7, D113).
 PANEL_COMMAND_KEY = "scalper.panel.command"
+#: Lines of the latest scenario brief shown in the chart's analysis box (S8, D114).
+BRIEF_LINES = 6
 MEDIAN_SPREAD_MIN_SAMPLES = 30
 EXIT_OK, EXIT_BROKER, EXIT_REFUSED, EXIT_NOT_CONFIRMED = 0, 1, 2, 3
 
@@ -612,14 +616,40 @@ class Trader:
                 closed=[s for s in month if s.exit_time >= now - dt.timedelta(hours=24)],
                 today=scalper_stats.summarize(label, day),
                 month=scalper_stats.summarize(label, mine),
-                session=self._sessions.status(now).session,
+                session=(
+                    "closed"
+                    if self._sessions.is_weekend(now)
+                    else self._sessions.status(now).session
+                ),
                 spread=spread,
                 spread_median=median,
                 news=news,
                 price=self.scalper.last_close,
+                layers={s.name: s.logic.chart() for s in self.scalper.slots.values()},
+                decision=slot.decision if slot is not None and slot.name == mode else None,
+                modes=self._mode_lines(now, mode, month),
             )
         except Exception as exc:  # noqa: BLE001 - the chart is a viewer only
             log.warning("scalp panel not written", error=repr(exc))
+
+    def _mode_lines(
+        self, now: dt.datetime, selected: str, month: Sequence[scalper_stats.ClosedScalp]
+    ) -> dict[str, str]:
+        """One line per scalper mode for the chart's analysis box (S8, D114)."""
+        lines: dict[str, str] = {}
+        since = now - dt.timedelta(hours=24)
+        for slot in self.scalper.slots.values():
+            day = [s for s in month if s.mode == slot.name and s.exit_time >= since]
+            total = sum(s.r_multiple for s in day)
+            opened = sum(len(e.open_positions) for e in slot.executors)
+            state = "selected" if slot.name == selected else "standby"
+            where = "demo" if self._scalps_to_demo(slot.name) else "paper"
+            last = f" | {slot.decision.text}" if slot.decision is not None else ""
+            lines[slot.name] = (
+                f"{scalper_stats.MODE_LABELS[slot.name]}: {state}, {where} | open {opened} | "
+                f"24h {len(day)} scalps {total:+.2f} R{last}"
+            )
+        return lines
 
     def _panel_commands(self, now: dt.datetime) -> None:
         """Buttons pressed on the chart panel (D99): each command once, if fresh."""
@@ -901,6 +931,11 @@ class Trader:
     ) -> None:
         if self._panel is None:
             return
+        try:
+            picture = self._panel_picture(now, bias)
+        except Exception as exc:  # noqa: BLE001 - the chart is a viewer: signals still go out
+            log.warning("panel analysis not built", error=repr(exc))
+            picture = {}
         self._panel.write(
             self._db,
             now=now,
@@ -910,7 +945,131 @@ class Trader:
             news_bias=bias.score if bias is not None else None,
             open_ids={p["id"] for p in self.executor.open_positions},
             waiting_ids={plan.id for plan in self.executor.pending_orders},
+            **picture,
         )
+
+    def _panel_picture(self, now: dt.datetime, bias: NewsBias | None) -> dict[str, Any]:
+        """What the chart panel adds to the signals (S8, D114): the analysis, setups
+        forming (A+ possible or not), the nearest pools and gaps, results, the brief."""
+        market = self._market
+        trigger: pd.DataFrame = market.get("trigger", pd.DataFrame())
+        if trigger.empty:
+            return {}
+        strategy = self._config.strategy
+        price = float(trigger["close"].iloc[-1])
+        current = self._sessions.status(now)
+        forming = []
+        for name, engine in self._engines():
+            if not getattr(self._config.models, name).enabled:
+                continue
+            for raid in engine.forming(trigger):
+                forming.append(
+                    {
+                        "since": raid.since,
+                        "direction": raid.direction.value,
+                        "level": raid.pool.price,
+                        "label": raid.pool.label,
+                        "extreme": raid.extreme,
+                        "stage": raid.stage,
+                        "text": raid.describe,
+                        "a_plus": a_plus_possible(raid, self._config.playbooks, current.session),
+                        "model": raid.model,
+                    }
+                )
+        resting = [p for p in self.engine.pools if not p.swept]
+        above = sorted((p for p in resting if p.price > price), key=lambda p: p.price)[:4]
+        below = sorted((p for p in resting if p.price <= price), key=lambda p: -p.price)[:4]
+        pools = [
+            {
+                "price": p.price,
+                "label": p.label,
+                "side": "above" if p in above else "below",
+                "strength": p.strength,
+                "created": p.created,
+            }
+            for p in [*above, *below]
+        ]
+        gaps = [
+            {"time": z.time, "top": z.top, "bottom": z.bottom, "direction": z.direction.value}
+            for z in open_gaps(
+                trigger.tail(CANDLES_KEPT),
+                atr_period=strategy.atr_period,
+                min_size_atr=strategy.fvg_min_atr,
+                keep=6,
+            )
+        ]
+        results = {
+            row.id: (row.r_multiple, row.exit_reason, row.exit_time)
+            for row in self.executor.trades_between(now - dt.timedelta(hours=24), now)
+        }
+        hourly = market.get("hourly")
+        h1 = None
+        if hourly is not None and not hourly.empty:
+            levels = self.engine.day_levels
+            h1 = compute_bias(
+                hourly,
+                price=price,
+                previous_mid=levels.previous_mid if levels else None,
+                news_bias=bias.score if bias is not None else 0.0,
+                config=strategy.bias,
+                swing_lookback=strategy.swing_lookback,
+            )
+        upcoming = self._sessions.next_tradeable_span(now)
+        if current.allowed and current.session:
+            window = f"{messages.session_name(current.session)} open now"
+        elif upcoming is not None:
+            window = f"next: {upcoming.label} {upcoming.start:%a %H:%M} UTC"
+        else:
+            window = "no window ahead"
+        if current.blocked:
+            window = f"{current.reasons[0]}; {window}"
+        release = self._news.next_event(now) if self._news else None
+        analysis: dict[str, Any] = {
+            "h1": h1.bias.value if h1 is not None else "-",
+            "h1_score": round(h1.score, 2) if h1 is not None else 0,
+            "session": current.session or "-",
+            "window": window,
+            "news_next": (
+                f"{release.currency} {release.title} in {messages.duration(release.time - now)}"
+                if release is not None
+                else ""
+            ),
+            "approved": ",".join(sorted(self._db.get_state(APPROVED_KEY, {}) or {})),
+            "price": round(price, self.spec.digits),
+            # The main strategy's last 24 hours, for the analysis box's Today page.
+            "today_n": len(results),
+            "today_r": round(sum(r for r, _, _ in results.values()), 2),
+        }
+        analysis.update(self._brief_lines())
+        return {
+            "armed_ids": {setup.id for setup in self._armed()},
+            "monitored_ids": {p.id for p in self._shadow.orders}
+            | {p["id"] for p in self._shadow.positions},
+            "results": results,
+            "analysis": analysis,
+            "forming": forming,
+            "pools": pools,
+            "gaps": gaps,
+        }
+
+    def _brief_lines(self) -> dict[str, Any]:
+        """The latest scenario brief as ``brief_title``, ``brief_time``, ``brief_1..6``."""
+        rows = self._db.query(
+            "SELECT time, trigger, body FROM scenarios ORDER BY time DESC LIMIT 1"
+        )
+        if not rows:
+            return {}
+        at, trigger, body = rows[0]
+        data = json.loads(body or "{}")
+        lines = [f"{c.get('name', '')}: {c.get('text', '')}" for c in data.get("cases", [])]
+        lines += [str(note) for note in data.get("notes", [])]
+        found: dict[str, Any] = {
+            "brief_title": str(trigger),
+            "brief_time": f"{dt.datetime.fromtimestamp(at, tz=dt.UTC):%a %H:%M} UTC",
+        }
+        for number, line in enumerate(lines[:BRIEF_LINES], 1):
+            found[f"brief_{number}"] = line
+        return found
 
     def _numbered(self, signal: Signal) -> Signal:
         """Signal ids continue from the database, so they stay unique across restarts."""
@@ -1076,6 +1235,10 @@ class Trader:
             "tags": list(signal.tags),
             "grade": grade,
             "monitoring": monitoring,
+            # For the chart panel (S8): the sweep's "x" and the session's playbook.
+            "sweep_x": round(signal.sweep.extreme, 5),
+            "sweep_t": signal.sweep.pierce_time.isoformat(),
+            "playbook": playbook_session(signal.session),
         }
         self._db.execute(
             "INSERT OR REPLACE INTO signals (id, time, direction, session, score, entry, "

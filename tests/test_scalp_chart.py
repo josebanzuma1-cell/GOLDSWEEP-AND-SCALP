@@ -173,7 +173,7 @@ def test_the_panel_file(tmp_path: Path) -> None:
     )
     head, items = panel_lines(panel.path)
     assert (head["version"], head["mode"], head["where"], head["status"]) == (
-        2,
+        3,
         "hft",
         "PAPER",
         "IN TRADE",
@@ -196,8 +196,20 @@ def test_the_panel_file(tmp_path: Path) -> None:
     kinds = [item["k"] for item in items]
     assert kinds == ["step", "step", "x", "scalp", "hit", "hit", "scalp"]
     step, _, sweep, done, hit1, hit2, live = items
-    assert step == {"k": "step", "t": chart_time(utc(2026, 11, 17, 8)), "v": 2031.46, "up": 0}
-    assert sweep == {"k": "x", "t": chart_time(utc(2026, 11, 17, 7, 58)), "p": 2032.4, "s": "high"}
+    assert step == {
+        "k": "step",
+        "mode": "hft",
+        "t": chart_time(utc(2026, 11, 17, 8)),
+        "v": 2031.46,
+        "up": 0,
+    }
+    assert sweep == {
+        "k": "x",
+        "mode": "hft",
+        "t": chart_time(utc(2026, 11, 17, 7, 58)),
+        "p": 2032.4,
+        "s": "high",
+    }
     assert (done["status"], done["dir"], done["r"], done["exit"], done["tp3"]) == (
         "closed",
         "BUY",
@@ -225,7 +237,11 @@ def test_the_panel_buttons_file(tmp_path: Path) -> None:
     (command,) = panel.read_commands()
     assert (command.id, command.name) == (17, "pause")
     assert command.time == dt.datetime.fromtimestamp(1763366700, tz=dt.UTC)
-    assert PANEL_COMMANDS == ("pause", "resume", "scalper:off")  # never an order
+    # The switches Telegram has (D114); never an order, the kill switch or an approval.
+    assert set(PANEL_COMMANDS) == {
+        "pause", "resume", "mode:main", "mode:scalper", "mode:both",
+        "scalper:off", "scalper:hft", "scalper:intraday", "scalper:swing",
+    }  # fmt: skip
 
 
 class PanelHarness(Harness):

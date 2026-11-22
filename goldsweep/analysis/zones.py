@@ -156,6 +156,37 @@ def find_fvgs(
     return zones
 
 
+def open_gaps(
+    frame: pd.DataFrame, *, atr_period: int = 14, min_size_atr: float = 0.05, keep: int = 8
+) -> list[Zone]:
+    """Fair value gaps on these bars that price has not traded back through, newest last
+    (for the dashboard chart and the MT5 panel).
+
+    A bullish gap is closed once a later low reaches its bottom; a bearish gap
+    once a later high reaches its top.
+    """
+    from goldsweep.analysis.indicators import atr_values
+
+    if len(frame) < 3:
+        return []
+    atr = atr_values(
+        frame["high"].to_numpy(), frame["low"].to_numpy(), frame["close"].to_numpy(), atr_period
+    )
+    highs, lows = frame["high"].to_numpy(), frame["low"].to_numpy()
+    found: list[Zone] = []
+    for direction in (Direction.LONG, Direction.SHORT):
+        for zone in find_fvgs(frame, atr, direction, min_size_atr=min_size_atr):
+            later = slice(zone.known_index + 1, None)
+            if direction is Direction.LONG:
+                closed = bool(np.any(lows[later] <= zone.bottom))
+            else:
+                closed = bool(np.any(highs[later] >= zone.top))
+            if not closed:
+                found.append(zone)
+    found.sort(key=lambda z: z.time)
+    return found[-keep:]
+
+
 def first_touch(candles: pd.DataFrame, zone: Zone, price: float, *, start: int) -> int | None:
     """First bar at or after ``start`` that trades back to ``price``.
 

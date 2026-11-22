@@ -20,12 +20,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
-from goldsweep.analysis.indicators import atr_values
 from goldsweep.analysis.structure import Direction
-from goldsweep.analysis.zones import Zone, find_fvgs
+from goldsweep.analysis.zones import Zone, open_gaps  # noqa: F401 - open_gaps is part of the API
 from goldsweep.core.clock import ensure_utc
 from goldsweep.core.settings import Settings
 from goldsweep.core.types import Timeframe
@@ -93,34 +91,6 @@ def bot_status(db: Database, now: dt.datetime) -> BotStatus:
 def candles(db: Database, symbol: str, bars: int = 144) -> pd.DataFrame:
     """The latest stored M5 bars (the bot keeps the last 300)."""
     return db.load_candles(symbol, Timeframe.M5, limit=bars)
-
-
-def open_gaps(
-    frame: pd.DataFrame, *, atr_period: int = 14, min_size_atr: float = 0.05, keep: int = 8
-) -> list[Zone]:
-    """Fair value gaps on these bars that price has not traded back through, newest last.
-
-    A bullish gap is closed once a later low reaches its bottom; a bearish gap
-    once a later high reaches its top.
-    """
-    if len(frame) < 3:
-        return []
-    atr = atr_values(
-        frame["high"].to_numpy(), frame["low"].to_numpy(), frame["close"].to_numpy(), atr_period
-    )
-    highs, lows = frame["high"].to_numpy(), frame["low"].to_numpy()
-    found: list[Zone] = []
-    for direction in (Direction.LONG, Direction.SHORT):
-        for zone in find_fvgs(frame, atr, direction, min_size_atr=min_size_atr):
-            later = slice(zone.known_index + 1, None)
-            if direction is Direction.LONG:
-                closed = bool(np.any(lows[later] <= zone.bottom))
-            else:
-                closed = bool(np.any(highs[later] >= zone.top))
-            if not closed:
-                found.append(zone)
-    found.sort(key=lambda z: z.time)
-    return found[-keep:]
 
 
 # --------------------------------------------------------------------------- #

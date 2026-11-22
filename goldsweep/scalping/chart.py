@@ -23,22 +23,37 @@ import datetime as dt
 import json
 import os
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from goldsweep.core.clock import ensure_utc
 from goldsweep.core.logging import get_logger
+from goldsweep.execution.panel import ascii_text
 from goldsweep.scalping.logic import ChartMarks
 from goldsweep.scalping.stats import ClosedScalp, Stats
+
+if TYPE_CHECKING:
+    from goldsweep.scalping.runner import Decision
 
 log = get_logger(__name__)
 
 SCALP_FILE = "scalp.json"
 COMMANDS_FILE = "scalp_commands.json"
-#: What the panel's buttons may ask for (D99): no orders, ever.
-PANEL_COMMANDS = ("pause", "resume", "scalper:off")
+#: What the panel's buttons may ask for (D99, D113, D114): the switches Telegram has;
+#: never an order, the kill switch or an approval.
+PANEL_COMMANDS = (
+    "pause",
+    "resume",
+    "mode:main",
+    "mode:scalper",
+    "mode:both",
+    "scalper:off",
+    "scalper:hft",
+    "scalper:intraday",
+    "scalper:swing",
+)
 #: Closed scalps drawn on the chart (their boxes and TP-hit markers).
 SHOWN_CLOSED = 12
 _TP_REASONS = {"tp1": "TP1", "tp2": "TP2", "tp3": "TP3"}
@@ -53,6 +68,11 @@ class PanelCommand:
 
 def _line(item: dict[str, Any]) -> str:
     return json.dumps(item, ensure_ascii=True, separators=(",", ":"))
+
+
+def _ascii(text: object) -> str:
+    """Plain ASCII without quotes, for the MQL5 line reader (as ``signals.json``)."""
+    return ascii_text(text)
 
 
 @dataclass(frozen=True)
@@ -102,10 +122,20 @@ class ScalpPanel:
         spread_median: float | None,
         news: str,
         price: float | None,
+        layers: Mapping[str, ChartMarks] | None = None,
+        decision: Decision | None = None,
+        modes: Mapping[str, str] | None = None,
     ) -> str:
-        """The whole file: the head on the first line, then one item per line."""
+        """The whole file: the head on the first line, then one item per line.
+
+        ``marks`` is the selected mode's picture (the head's trend and ATR); ``layers``
+        every mode's, whose step line, sweeps, lines and boxes become items tagged with
+        their mode (v3, S8). ``decision`` is the selected mode's latest outcome and
+        ``modes`` one status line per mode, for the analysis box.
+        """
+        layers = layers or {mode: marks}
         head: dict[str, Any] = {
-            "version": 2,
+            "version": 3,
             "mode": mode,
             "where": where.upper(),
             "state": state,
@@ -117,7 +147,7 @@ class ScalpPanel:
             "session": session or "-",
             "spread": round(spread, 1) if spread is not None else 0,
             "spread_median": round(spread_median, 1) if spread_median is not None else 0,
-            "news": news,
+            "news": _ascii(news),
             "updated": self.to_chart_time(now),
             "updated_gmt": int(ensure_utc(now).timestamp()),
             "updated_utc": ensure_utc(now).strftime("%Y-%m-%d %H:%M UTC"),
@@ -134,14 +164,60 @@ class ScalpPanel:
                 }
             )
         head.update(self._active(open_scalps, mode, now, price))
-        items = [
-            _line({"k": "step", "t": self._t(t), "v": self._price(value), "up": int(trend > 0)})
-            for t, value, trend in marks.line
-        ]
-        items += [
-            _line({"k": "x", "t": self._t(t), "p": self._price(p), "s": side})
-            for t, p, side in marks.sweeps
-        ]
+        head.update(
+            {
+                "signal": decision.signal if decision is not None else "NONE",
+                "signal_text": _ascii(decision.text) if decision else "waiting for the next bar",
+                "signal_t": self._t(decision.time) if decision is not None else 0,
+            }
+        )
+        for name, text in (modes or {}).items():
+            head[f"m_{name}"] = _ascii(text)
+        items: list[str] = []
+        for name, layer in layers.items():
+            items += [
+                _line(
+                    {
+                        "k": "step",
+                        "mode": name,
+                        "t": self._t(t),
+                        "v": self._price(value),
+                        "up": int(trend > 0),
+                    }
+                )
+                for t, value, trend in layer.line
+            ]
+            items += [
+                _line({"k": "x", "mode": name, "t": self._t(t), "p": self._price(p), "s": side})
+                for t, p, side in layer.sweeps
+            ]
+            for line_name, points in layer.lines:
+                items += [
+                    _line(
+                        {
+                            "k": "line",
+                            "mode": name,
+                            "name": line_name,
+                            "t": self._t(t),
+                            "v": self._price(value),
+                        }
+                    )
+                    for t, value in points
+                ]
+            items += [
+                _line(
+                    {
+                        "k": "box",
+                        "mode": name,
+                        "name": box_name,
+                        "t1": self._t(start),
+                        "t2": self._t(end),
+                        "top": self._price(high),
+                        "bot": self._price(low),
+                    }
+                )
+                for box_name, start, end, high, low in layer.boxes
+            ]
         for scalp in closed[-SHOWN_CLOSED:]:
             items.append(_line(self._closed_item(scalp)))
             for leg in scalp.legs:
