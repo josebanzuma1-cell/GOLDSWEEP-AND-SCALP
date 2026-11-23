@@ -28,6 +28,19 @@ def only_spec_model(settings: Settings) -> Settings:
     )
 
 
+def without_grade_filter(settings: Settings) -> Settings:
+    """``settings`` with HFT's A/A+ filter off (S9, D115), for tests of what the scalper
+    does with a setup once it may trade (the filter has its own tests)."""
+    scalper = settings.config.scalper
+    hft = scalper.hft.model_copy(update={"grade_filter": "off"})
+    return dataclasses.replace(
+        settings,
+        config=settings.config.model_copy(
+            update={"scalper": scalper.model_copy(update={"hft": hft})}
+        ),
+    )
+
+
 def utc(
     year: int, month: int, day: int, hour: int = 0, minute: int = 0, second: int = 0
 ) -> dt.datetime:

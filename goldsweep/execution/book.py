@@ -137,25 +137,32 @@ class TradePlan:
     #: An open position is closed at the first bar close at or after this time (the
     #: scalper's intraday mode: flat before the New York rollover). None: no limit.
     close_by: dt.datetime | None = None
+    #: The HFT burst's fourth and fifth targets (S9, D115); None everywhere else.
+    take_profit_4: float | None = None
+    take_profit_5: float | None = None
 
     def __post_init__(self) -> None:
         numbers = [self.entry, self.stop_loss, self.take_profit_1]
-        numbers += [t for t in (self.take_profit_2, self.take_profit_3) if t is not None]
+        numbers += [t for t in self.targets[1:] if t is not None]
         if not all(isinstance(n, int | float) and math.isfinite(n) for n in numbers):
             raise InvalidPlan(f"{self.id}: every order needs a finite entry, stop-loss and target")
         sign = self.direction.sign
         if (self.entry - self.stop_loss) * sign <= 0:
             raise InvalidPlan(f"{self.id}: the stop-loss is not on the losing side of the entry")
-        if (self.take_profit_1 - self.entry) * sign <= 0:
-            raise InvalidPlan(f"{self.id}: TP1 is not on the winning side of the entry")
-        if self.take_profit_2 is not None and (self.take_profit_2 - self.entry) * sign <= 0:
-            raise InvalidPlan(f"{self.id}: TP2 is not on the winning side of the entry")
-        if self.take_profit_3 is not None and (self.take_profit_3 - self.entry) * sign <= 0:
-            raise InvalidPlan(f"{self.id}: TP3 is not on the winning side of the entry")
+        for number, target in enumerate(self.targets, 1):
+            if target is not None and (target - self.entry) * sign <= 0:
+                raise InvalidPlan(f"{self.id}: TP{number} is not on the winning side of the entry")
 
     @property
-    def targets(self) -> tuple[float | None, float | None, float | None]:
-        return (self.take_profit_1, self.take_profit_2, self.take_profit_3)
+    def targets(self) -> tuple[float | None, ...]:
+        """TP1..TP5 (None where the plan has no such target)."""
+        return (
+            self.take_profit_1,
+            self.take_profit_2,
+            self.take_profit_3,
+            self.take_profit_4,
+            self.take_profit_5,
+        )
 
     @property
     def risk_distance(self) -> float:
@@ -256,6 +263,8 @@ class TradePlan:
             "take_profit_3": self.take_profit_3,
             "expiry_note": self.expiry_note,
             "close_by": self.close_by.isoformat() if self.close_by else None,
+            "take_profit_4": self.take_profit_4,
+            "take_profit_5": self.take_profit_5,
         }
 
     @classmethod
@@ -375,40 +384,55 @@ def plan_legs(
 ) -> list[LegPlan]:
     """Split ``lots`` over the plan's targets (spec 7b: 50 / 30 / 20 by default).
 
-    ``split`` (fractions for TP1, TP2, TP3, e.g. the scalper's 0.4 / 0.3 / 0.3, D90)
-    replaces the risk settings' percentages when given. A missing target gives its
-    share to the nearest earlier one, so without a TP3 the rest goes to TP2 and
-    without a TP2 to TP1. Every part but the last is rounded down to the volume
-    step; the last takes the remainder. When a part would fall below the broker's
-    minimum volume, the farthest part is folded into the one before it until every
-    part can be traded.
+    ``split`` (fractions for TP1..TP5, e.g. the scalper's 0.4 / 0.3 / 0.3, D90, or the
+    HFT burst's five fifths, D115) replaces the risk settings' percentages when given.
+    A missing target gives its share to the nearest earlier one, so without a TP3 the
+    rest goes to TP2 and without a TP2 to TP1.
+
+    Without a ``split`` (the main strategy) every part but the last is rounded down to
+    the volume step and the last takes the remainder. With one, the lots are shared out
+    in whole volume steps, the largest remainders first (earlier parts win ties), so
+    0.08 lots over five fifths is 0.02 / 0.02 / 0.02 / 0.01 / 0.01. When a part would
+    fall below the broker's minimum volume, the farthest part is folded into the one
+    before it until every part can be traded.
     """
-    reasons = (ExitReason.TP1, ExitReason.TP2, ExitReason.TP3)
+    count = len(TARGET_REASONS)
     if split is not None:
-        shares = [100.0 * share for share in split][:3]
-        shares += [0.0] * (3 - len(shares))
+        shares = [100.0 * share for share in split][:count]
+        shares += [0.0] * (count - len(shares))
     else:
         first = risk.partial_close_at_tp1_pct
         second = min(risk.partial_close_at_tp2_pct, 100.0 - first)
-        shares = [first, second, max(0.0, 100.0 - first - second)]
+        shares = [first, second, max(0.0, 100.0 - first - second), 0.0, 0.0]
     present = [t is not None for t in plan.targets]
-    for k in (2, 1):
+    for k in range(count - 1, 0, -1):
         if not present[k]:
             earlier = max(i for i in range(k) if present[i])
             shares[earlier] += shares[k]
             shares[k] = 0.0
     chosen = [
-        (share, target, reasons[i])
+        (share, target, TARGET_REASONS[i])
         for i, (share, target) in enumerate(zip(shares, plan.targets, strict=True))
         if target is not None and share > 0
     ]
     step = spec.volume_step
     parts: list[float] = []
-    for i, (share, _target, _reason) in enumerate(chosen):
-        if i == len(chosen) - 1:
-            parts.append(round(lots - sum(parts), 8))
-        else:
-            parts.append(round(math.floor(lots * share / 100.0 / step + _EPSILON) * step, 8))
+    if split is not None:
+        units = int(round(lots / step))
+        total = sum(share for share, _t, _r in chosen) or 1.0
+        ideal = [units * share / total for share, _t, _r in chosen]
+        counts = [int(math.floor(value + _EPSILON)) for value in ideal]
+        order = sorted(range(len(chosen)), key=lambda i: (-(ideal[i] - counts[i]), i))
+        for i in order[: units - sum(counts)]:
+            counts[i] += 1
+        parts = [round(n * step, 8) for n in counts]
+        parts[-1] = round(parts[-1] + (lots - units * step), 8)  # any rounding dust
+    else:
+        for i, (share, _target, _reason) in enumerate(chosen):
+            if i == len(chosen) - 1:
+                parts.append(round(lots - sum(parts), 8))
+            else:
+                parts.append(round(math.floor(lots * share / 100.0 / step + _EPSILON) * step, 8))
     while len(parts) > 1 and min(parts) < spec.volume_min - _EPSILON:
         extra = parts.pop()
         chosen.pop()
@@ -485,10 +509,12 @@ class StepLineSource(Protocol):
 class Management:
     """Extra position rules for one book (the scalper's). None of them apply without it.
 
-    * ``split``: shares of the lots for TP1..TP3 instead of the risk settings';
+    * ``split``: shares of the lots for TP1..TP5 instead of the risk settings' (up to
+      five; each share in whole volume steps, the largest remainders first);
     * ``breakeven_offset``: after TP1 the stop goes that far *past* the entry (the
       costs: "breakeven+") instead of to the entry itself;
-    * ``stop_to_tp1_after_tp2``: after TP2 the stop goes to TP1;
+    * ``stop_to_tp1_after_tp2``: the ladder: after TP k (k >= 2) the stop goes to
+      TP k-1 (after TP2 to TP1, after TP3 to TP2, ...; D115);
     * ``step_trail``: the stop follows the step-trail line +/- ``trail_buffer_atr`` x ATR;
     * ``time_stop``: a position not yet at TP1 is looked at once, this long after its
       fill, and closed unless it is at least ``time_stop_min_r`` R up.
@@ -603,6 +629,8 @@ class ExitReason(StrEnum):
     TP1 = "tp1"
     TP2 = "tp2"
     TP3 = "tp3"
+    TP4 = "tp4"  # the HFT burst's parts 4 and 5 (S9, D115)
+    TP5 = "tp5"
     STOP = "stop"
     BREAKEVEN = "breakeven"
     TRAIL = "trail"
@@ -610,6 +638,29 @@ class ExitReason(StrEnum):
     SESSION_END = "session_end"  # the plan's close_by time came (intraday: flat by the rollover)
     END_OF_DATA = "end_of_data"
     MANUAL = "manual"  # closed by the kill switch (/stop)
+
+
+#: The take-profit exits, nearest first (TP4 and TP5 only in the HFT burst, D115).
+TARGET_REASONS = (
+    ExitReason.TP1,
+    ExitReason.TP2,
+    ExitReason.TP3,
+    ExitReason.TP4,
+    ExitReason.TP5,
+)
+
+
+def target_number(reason: ExitReason) -> int:
+    """1..5 for a take-profit exit, 0 for any other."""
+    return TARGET_REASONS.index(reason) + 1 if reason in TARGET_REASONS else 0
+
+
+def previous_target(plan: TradePlan, reached: int) -> float | None:
+    """The ladder rule's level (D90, D115): once TP k (k >= 2) is reached, the stop of
+    what is left goes to TP k-1. ``None`` before TP2 or when that target is absent."""
+    if reached < 2:
+        return None
+    return plan.targets[reached - 2]
 
 
 class Outcome(StrEnum):
@@ -767,6 +818,13 @@ class _Position:
     breakeven_done: bool = False
     tp2_done: bool = False
     time_checked: bool = False  # the time stop has had its one look
+    reached: int = 0  # the highest target reached so far (1..5; D115)
+
+    def reach(self, reason: ExitReason) -> None:
+        """Note a take-profit exit (the ladder rule follows the highest one)."""
+        self.reached = max(self.reached, target_number(reason))
+        self.tp1_done = self.tp1_done or self.reached >= 1
+        self.tp2_done = self.tp2_done or self.reached >= 2
 
     @property
     def long(self) -> bool:
@@ -1014,10 +1072,7 @@ class TradeBook:
                 )
                 if reached:
                     self._close_leg(position, leg, leg.target, bar.close_time, leg.reason, events)
-                    if leg.reason is ExitReason.TP1:
-                        position.tp1_done = True
-                    elif leg.reason is ExitReason.TP2:
-                        position.tp2_done = True
+                    position.reach(leg.reason)
             if not position.legs:
                 self._finish(position, events)
                 continue
@@ -1134,11 +1189,12 @@ class TradeBook:
             elif (position.fill_price - position.stop) * sign > 0:
                 position.stop = position.fill_price
                 position.stop_reason = ExitReason.BREAKEVEN
-        if rules is not None and rules.stop_to_tp1_after_tp2 and position.tp2_done:
+        previous = previous_target(position.plan, max(position.reached, 2 * position.tp2_done))
+        if rules is not None and rules.stop_to_tp1_after_tp2 and previous is not None:
             level = ladder_stop(
                 long=long,
                 stop=position.stop,
-                take_profit_1=position.plan.take_profit_1,
+                take_profit_1=previous,
                 close=bar.close,
                 spread=bar.spread,
             )
@@ -1364,6 +1420,7 @@ class TradeBook:
                     "breakeven_done": p.breakeven_done,
                     "tp2_done": p.tp2_done,
                     "time_checked": p.time_checked,
+                    "reached": p.reached,
                 }
                 for p in self._positions
             ],
@@ -1406,6 +1463,7 @@ class TradeBook:
                 breakeven_done=p["breakeven_done"],
                 tp2_done=p.get("tp2_done", False),
                 time_checked=p.get("time_checked", False),
+                reached=p.get("reached", 2 if p.get("tp2_done") else int(bool(p["tp1_done"]))),
             )
             for p in state.get("positions", [])
         ]

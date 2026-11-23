@@ -96,12 +96,12 @@ def test_fixed_r_targets_replace_the_pools() -> None:
     original = plan()  # long 2029.00, stop 2027.00: one R is 2.00
     assert original.with_exit_targets(RiskConfig()) is original  # pools: unchanged
     one = original.with_exit_targets(RiskConfig(target_mode="fixed_r", fixed_targets_r=(3.0,)))
-    assert one.targets == (2035.0, None, None) and one.risk_reward_1 == 3.0
+    assert one.targets == (2035.0, None, None, None, None) and one.risk_reward_1 == 3.0
     assert split(one, 0.10) == [(0.10, "tp1")]  # one target: everything closes there
     three = original.with_exit_targets(
         RiskConfig(target_mode="fixed_r", fixed_targets_r=(2.0, 3.0, 5.0))
     )
-    assert three.targets == (2033.0, 2035.0, 2039.0)
+    assert three.targets == (2033.0, 2035.0, 2039.0, None, None)
     assert split(three, 0.10) == [(0.05, "tp1"), (0.03, "tp2"), (0.02, "tp3")]
     short = plan(
         direction=Direction.SHORT,
@@ -112,7 +112,7 @@ def test_fixed_r_targets_replace_the_pools() -> None:
         take_profit_3=2023.0,
     )
     fixed = short.with_exit_targets(RiskConfig(target_mode="fixed_r", fixed_targets_r=(2.5,)))
-    assert fixed.targets == (2024.0, None, None)
+    assert fixed.targets == (2024.0, None, None, None, None)
 
 
 @pytest.mark.parametrize("values", [(), (3.0, 2.0), (1.0, 2.0, 3.0, 4.0), (0.0,), (2.0, 2.0)])

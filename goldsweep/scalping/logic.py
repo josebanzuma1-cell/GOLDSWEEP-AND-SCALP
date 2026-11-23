@@ -30,7 +30,7 @@ import math
 import statistics
 from abc import ABC, abstractmethod
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -110,8 +110,8 @@ class Gate:
 
 def mode_management(mode: str, config: ScalperConfig, breakeven_offset: float) -> Management:
     """How ``mode`` manages a position (the same rules on paper, in backtests and live)."""
-    if mode == HFT:
-        return scalp_management(config, breakeven_offset)
+    if mode == HFT:  # five parts on the quick ladder (S9, D115)
+        return replace(scalp_management(config, breakeven_offset), split=config.hft.split)
     if mode == INTRADAY:
         return Management(
             split=config.split,
@@ -338,8 +338,16 @@ class HftLogic(ModeLogic):
     def plan(
         self, candidate: Candidate, costs: LadderCosts, *, plan_id: str, session: str | None
     ) -> ScalpPlan:
+        hft = self._cfg.hft
         return scalp_plan(
-            candidate.source, self._cfg, costs, plan_id=plan_id, session=session, bar=MINUTE
+            candidate.source,
+            self._cfg,
+            costs,
+            plan_id=plan_id,
+            session=session,
+            bar=MINUTE,
+            split=hft.split,
+            step_r=hft.step_r,
         )
 
 

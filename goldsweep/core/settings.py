@@ -805,6 +805,7 @@ class ScalperRiskConfig(_StrictModel):
 
 
 ScalperMode = Literal["off", "hft", "intraday", "swing"]
+ScalperModeName = Literal["hft", "intraday", "swing"]
 StrategyChoice = Literal["main", "scalper", "both"]
 
 
@@ -814,19 +815,36 @@ def _off_if_false(value: Any) -> Any:
 
 
 class SwitchConfig(_StrictModel):
-    """Which strategies may open trades, and the scalper's mode (D103).
+    """Which strategies may open trades, and the scalper's modes (D103, D115).
 
     These are the defaults at startup; ``/mode`` and ``/scalper`` on Telegram (or the
-    dashboard) change them while the bot runs, and the change is kept in the database.
+    dashboard and the chart) change them while the bot runs, and the change is kept in
+    the database. ``scalper_modes`` lists the selected modes (``[]``: off; S9);
+    ``scalper_mode`` is the single mode of S5-S8, read only when the list is empty.
     """
 
     strategies: StrategyChoice = "main"
+    scalper_modes: tuple[ScalperModeName, ...] = ()
     scalper_mode: ScalperMode = "off"
 
     @field_validator("scalper_mode", mode="before")
     @classmethod
     def _unquoted_off(cls, value: Any) -> Any:
         return _off_if_false(value)
+
+    @field_validator("scalper_modes")
+    @classmethod
+    def _each_once(cls, value: tuple[ScalperModeName, ...]) -> tuple[ScalperModeName, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("switch.scalper_modes lists a mode twice")
+        return value
+
+    @property
+    def modes(self) -> tuple[str, ...]:
+        """The selected scalper modes at startup."""
+        if self.scalper_modes:
+            return tuple(self.scalper_modes)
+        return () if self.scalper_mode == "off" else (self.scalper_mode,)
 
 
 class TicksConfig(_StrictModel):
@@ -987,6 +1005,44 @@ class SwingScalpConfig(_StrictModel):
         return self
 
 
+HftGradeFilter = Literal["off", "a_plus", "a"]
+
+
+class HftConfig(_StrictModel):
+    """HFT bursts (S9, D115): one scalp in up to five parts on a quick ladder, taken only
+    in the direction of the main strategy's A or A+ setups.
+
+    The parts share one risk budget (``scalper.risk.risk_per_scalp_pct`` for all of them
+    together); the ladder rule moves the stop past the entry after TP1 and to TP k-1
+    after TP k.
+    """
+
+    #: Shares of the lots for TP1..TP5.
+    split: tuple[float, ...] = (0.2, 0.2, 0.2, 0.2, 0.2)
+    #: TP k sits k x ``step_r`` R from the entry (0.25: 0.25/0.5/0.75/1.0/1.25 R). The
+    #: cost gate may widen it up to ``scalper.tp_step_r_max``.
+    step_r: float = Field(default=0.25, gt=0, le=10)
+    #: ``a``: only with an A or A+ setup; ``a_plus``: only with an A+ one; ``off``: any.
+    grade_filter: HftGradeFilter = "a"
+    #: An A/A+ signal allows HFT in its direction for at most this long, and only while
+    #: the setup is still live (not at its last target, not stopped, its trade open).
+    a_window_min: int = Field(default=60, ge=1, le=1440)
+
+    @field_validator("grade_filter", mode="before")
+    @classmethod
+    def _unquoted_off(cls, value: Any) -> Any:
+        return _off_if_false(value)
+
+    @field_validator("split")
+    @classmethod
+    def _split_sums_to_one(cls, value: tuple[float, ...]) -> tuple[float, ...]:
+        if not 1 <= len(value) <= 5 or any(share <= 0 for share in value):
+            raise ValueError("scalper.hft.split needs one to five positive shares")
+        if abs(sum(value) - 1.0) > 1e-6:
+            raise ValueError("scalper.hft.split must add up to 1")
+        return value
+
+
 #: Each scalper mode's magic number is ``scalper.magic_number`` plus its offset (D112),
 #: so each mode's demo executor knows its own positions.
 SCALPER_MAGIC_OFFSETS = {"hft": 0, "intraday": 1, "swing": 2}
@@ -1038,6 +1094,7 @@ class ScalperConfig(_StrictModel):
     swing: SwingConfig = SwingConfig()
     swing_scalp: SwingScalpConfig = SwingScalpConfig()
     h1_trend: H1TrendConfig = H1TrendConfig()
+    hft: HftConfig = HftConfig()
 
     def magic_for(self, mode: str) -> int:
         """The magic number of ``mode``'s orders (hft, intraday, swing)."""
@@ -1058,6 +1115,8 @@ class ScalperConfig(_StrictModel):
             raise ValueError("scalper.sl_min_atr must be below scalper.sl_max_atr")
         if self.tp_step_r > self.tp_step_r_max:
             raise ValueError("scalper.tp_step_r must not exceed scalper.tp_step_r_max")
+        if self.hft.step_r > self.tp_step_r_max:
+            raise ValueError("scalper.hft.step_r must not exceed scalper.tp_step_r_max")
         if len(set(self.sessions)) != len(self.sessions):
             raise ValueError("scalper.sessions contains duplicates")
         return self

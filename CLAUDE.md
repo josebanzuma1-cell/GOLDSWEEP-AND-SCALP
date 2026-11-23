@@ -55,6 +55,23 @@ martingale, hedging and stacking are never built.
   `SignalEngine.forming()` and `grades.a_plus_possible`, which claims "A+ possible" only
   from what is known before the signal. Never use the reference product's name,
   emblem, mascot or purple artwork (a test checks the name).
+- **Modes side by side, HFT bursts** (S9, D115): `switch.scalper_modes` (state
+  `switch.scalper_modes`, a list; S5-S8's single `switch.scalper_mode` is read only
+  when no list is stored) selects one, two or all three modes; `/scalper hft,swing`,
+  `/scalper all`, the panel's toggles (`PANEL_COMMANDS` holds every combination) and
+  the dashboard's multiselect set it. `ScalpContext.modes` / `demo_modes`;
+  `ScalperRunner.shared_refusal` applies the rules the modes share per account (paper
+  books together, or the demo account): no hedging, no stacking unless every same-way
+  scalp is risk-free, one daily R limit, scalps-a-day count and losses-in-a-row pause.
+  A plan has up to five targets (`take_profit_4/5`, `ExitReason.TP4/TP5`); after TP k
+  (k >= 2) the stop goes to TP k-1 (`previous_target`, by `reached`), on paper and in
+  `MT5Executor._manage`. Scalper splits share lots in whole steps, largest remainders
+  first; the main strategy's split is unchanged. HFT (`scalper.hft`) is five parts at
+  0.25 R steps and trades only the direction of a live A/A+ setup
+  (`scalping/grade_filter.py`, fed by `Trader._hft_setups` from the `signals` table and
+  the "A+ possible" forming setups, judged against `ScalperRunner.path`); a done setup
+  stops new HFT scalps, never closes an open one. Tests of what a scalp does once placed
+  use `tests.helpers.without_grade_filter`.
 - **Ticks** (D106): off since D111 (`ticks.record: false`); the code stays.
   `TickRecorder` saves each finished hour to `data/ticks/<symbol>/<YYYY-MM-DD>/<HH>.npz`
   (UTC ms, bid, ask); read them with `load_ticks`. Brokers serve ticks through

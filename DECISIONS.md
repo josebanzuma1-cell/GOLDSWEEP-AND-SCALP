@@ -2031,3 +2031,114 @@ drawn.
 the buttons, the indicator's source (never trades, writes only its command file) and that
 the reference product's name appears nowhere but the owner's verbatim prompt. The chart
 itself is checked by the owner on screen: no screenshot can be taken from this session.
+
+### D115. S9: scalper modes side by side, HFT in five quick parts, HFT only with A/A+ setups
+
+**The owner's request (2026-11-23):** let the bot trade at least two scalper modes, with
+the choice of one, two or three; in HFT, open several trades at once ("5 of 0.3 lot"),
+close them as soon as they move our way and repeat, only in favourable A+ setups; and
+"the repetitive HFT scalping should stop as soon as the setup seems to stop or has
+fulfilled the move". The demo balance is now 11,071.28 USD (read from MT5 before each
+order: no code change).
+
+**Risk, as asked and as built.** Five trades of 0.3 lots is 1.5 lots: at a typical
+HFT stop of about 3.10 one loss would cost about 465 USD (4.2% of the account), and the
+five positions would be stacked on one idea. That breaks the rules that are never
+relaxed (small, controlled losses; no stacking). The owner chose instead (2026-11-23):
+**0.25% risk for the whole HFT trade, split into five parts; targets at
+0.25/0.5/0.75/1.0/1.25 R; HFT only in the direction of an A or A+ setup.** The five parts
+are one trade with one stop and one risk budget, like the three children before; there
+is still no martingale, grid, averaging down or hedging.
+
+**Built:**
+
+- **One, two or three modes.** `switch.scalper_modes` (config list, state key
+  `switch.scalper_modes`); S5-S8's `switch.scalper_mode` is read only when no list is
+  stored. `/scalper off | hft | hft,swing | hft swing | all`; the dashboard's Control
+  tab has a multiselect; the chart panel's HFT, Intraday and Swing buttons are toggles
+  that send the whole list (`PANEL_COMMANDS` holds `scalper:off` and every combination
+  in the fixed order hft, intraday, swing). Each selected mode keeps its own books,
+  magic number and one scalp at a time. `/status`, `/stats`, the snapshot and
+  `scalp.json` show every selected mode; the Quick Scalp line is the newest decision of
+  any selected mode.
+- **The rules the modes share, per account** (`ScalperRunner.shared_refusal`; the
+  account is the paper books together or the demo account):
+  1. no scalp against another mode's open or waiting scalp (no hedging; the main
+     strategy still comes first on the demo account, D92);
+  2. a second scalp the same way only when every scalp open that way is risk-free (its
+     stop at or past its entry); a waiting one blocks (no stacking);
+  3. one set of daily limits for every mode: the scalper's daily loss in R
+     (`daily_loss_limit_pct / risk_per_scalp_pct` = -4 R), its scalps a day (8, open
+     ones included) and the 24-hour pause after 3 losses in a row, counted from the
+     stored scalps of that account exactly as the risk manager counts them.
+  Each mode's own executor still applies its own limits on top.
+- **Up to five targets** (`TradePlan.take_profit_4/5`, `ExitReason.TP4/TP5`). The
+  ladder rule is generalised: after TP1 the stop goes past the entry (breakeven+), after
+  TP k (k >= 2) to TP k-1 (`previous_target`, by the highest target reached), applied by
+  the paper book and `MT5Executor._manage` with the same functions. Three-part scalps
+  behave as before (after TP2 to TP1).
+- **Lot split.** A scalper split shares the lots out in whole volume steps, the largest
+  remainders first (0.08 lots in five parts: 0.02/0.02/0.02/0.01/0.01, not
+  0.01 x 4 + 0.04; ties go to the earlier part). This also changes three-part scalps
+  slightly (0.08 lots: 3/3/2 steps instead of 3/2/3; 0.02 lots: TP1 and TP2 a step each
+  instead of all at TP1). The main strategy's split is unchanged.
+- **HFT** (`scalper.hft`): `split: [0.2 x 5]`, `step_r: 0.25`; the cost gate still
+  needs TP1 at least twice the round-trip cost away and widens the step up to
+  `tp_step_r_max` (2 R) when it is not (with this account's 0.30 round trip a 1.90 stop
+  gets 0.60 steps). Each part is its own MT5 position with the stop and its own target
+  (`GS-SC|<id>|1..5`). After a winning scalp the next HFT setup may enter at once (the
+  cooldown is only after a stop-out): that is the repetition the owner asked for, one
+  HFT trade at a time, within the shared limits. The 15-minute time stop and the step
+  trail stay.
+- **HFT only with an A or A+ setup, and only while it lasts**
+  (`scalping/grade_filter.py`; `scalper.hft.grade_filter: a | a_plus | off`,
+  `a_window_min: 60`). Each minute the bot gives the runner the main strategy's signals
+  graded A or A+ in the last 60 minutes (`signals` table: grade, last target, the
+  sweep's extreme, whether its trade has closed) and the setups forming now that can
+  still be A+ ("A+ possible", S8). The runner judges each against the M1 bars since it
+  formed (`ScalperRunner.path`). A setup stops allowing HFT its way when:
+  - price reaches its last target (the move is fulfilled);
+  - price runs back through the sweep's extreme (or its stop if none is stored): the
+    setup failed;
+  - its trade closes;
+  - it is more than 60 minutes old;
+  - for a forming setup, it is no longer forming (it became a signal, which then counts
+    as above, or faded away).
+  When one bar touches both the failure level and the target, failure is assumed (the
+  worse case). An HFT candidate in any other direction is skipped and the reason shows
+  in the Quick Scalp line, e.g. "HFT follows A or A+ setups: the A+ BUY 13:05 UTC setup
+  reached its target". **An open HFT scalp is never closed by this:** it finishes under
+  its own stop, targets and time stop, so the filter can only stop new risk, never add
+  any. Intraday and swing scalping are unchanged.
+- **Chart panel v3.1** (`mt5/GoldSweepPanel.mq5`, MetaEditor: 0 errors, 0 warnings):
+  the mode toggles, TP4/TP5 lines on scalp boxes, TP4/TP5 hits, and the dashboard's
+  trade column in up to six rows (targets two to a row). `scalp.json` carries
+  `tp4`/`tp5` on scalp lines and `active_tp4/5` in the head; `mode` is the selection
+  (`hft,swing`).
+
+**Not done:** the A filter cannot be backtested with `mode_backtest`, which replays M1
+bars without the main strategy's signals; the filter is judged on paper and on the demo
+account (D111). The size the owner first asked for (5 x 0.3 lots) is not offered at any
+setting.
+
+**The HFT backtest with the five-part ladder** (`mode_backtest --mode hft`,
+2024-01-01..2026-10-31, a 10,000 balance, this account's costs; without the A filter,
+which the replay cannot apply):
+
+| HFT ladder | Trades | A day | Won | PF | R a trade | Before costs | First 2/3 | Last 1/3 | Max DD |
+|---|---|---|---|---|---|---|---|---|---|
+| Three parts, 0.5 R steps (D111) | 3,760 | 4.25 | 56.0% | 0.64 | -0.12 | -0.02 | | | 65.8% |
+| Five parts, 0.25 R steps (S9) | 4,143 | 4.69 | 62.6% | 0.56 | -0.12 | -0.04 | -0.12 | -0.11 | 69.7% |
+
+The quick ladder wins more often (62.6%) but takes less from each win, so it loses the
+same 0.12 R a scalp after costs, with a lower profit factor and a deeper drawdown: by
+exit, the full stop-outs (746, -1.01 R) outweigh everything the targets bring in. A
+smaller first target does not fix HFT on its own. Whether trading only with a live A or
+A+ setup does is the open question; it can only be answered on paper and the demo
+account, which judge the mode (D111). Past results do not predict future ones.
+
+**Checked here:** 1,030 tests (25 new: settings, parsing a selection, five parts in
+whole steps, the ladder on paper and on the fake MT5 account, the HFT plan and its cost
+gate, two modes side by side, the panel's list command, no hedging or stacking across
+modes, the shared daily limits, every way an A/A+ setup stops allowing HFT, and the
+filter end to end in the bot); the older HFT figures moved to the five-part ladder.

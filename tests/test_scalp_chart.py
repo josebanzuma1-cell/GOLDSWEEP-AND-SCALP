@@ -28,11 +28,17 @@ from goldsweep.scalping.chart import PANEL_COMMANDS, ScalpPanel
 from goldsweep.scalping.engine import ScalpEngine
 from goldsweep.scalping.logic import ChartMarks
 from goldsweep.storage.db import Database
-from tests.helpers import utc
+from tests.helpers import utc, without_grade_filter
 from tests.test_scalp_engine import SELL_ROWS, START, config
 from tests.test_scalper_runner import M1, MINUTE, SIGNAL_BAR, Harness, ScriptedEngine, setup_at
 
 EPOCH = utc(2026, 11, 17)
+
+
+@pytest.fixture
+def settings(settings: Settings) -> Settings:
+    """S9's A/A+ filter is off here: these tests follow what a scalp does once placed."""
+    return without_grade_filter(settings)
 
 
 def chart_time(moment: dt.datetime) -> int:
@@ -238,9 +244,12 @@ def test_the_panel_buttons_file(tmp_path: Path) -> None:
     assert (command.id, command.name) == (17, "pause")
     assert command.time == dt.datetime.fromtimestamp(1763366700, tz=dt.UTC)
     # The switches Telegram has (D114); never an order, the kill switch or an approval.
+    # The scalper's selections: off and every combination of modes (S9, D115).
     assert set(PANEL_COMMANDS) == {
         "pause", "resume", "mode:main", "mode:scalper", "mode:both",
         "scalper:off", "scalper:hft", "scalper:intraday", "scalper:swing",
+        "scalper:hft,intraday", "scalper:hft,swing", "scalper:intraday,swing",
+        "scalper:hft,intraday,swing",
     }  # fmt: skip
 
 
@@ -288,11 +297,16 @@ def test_the_bot_writes_the_panel_file_each_minute(
     assert head["updated_utc"] == "2026-11-17 08:01 UTC"
     (live,) = [item for item in items if item["k"] == "scalp"]
     assert (live["status"], live["dir"], live["sl"]) == ("open", "BUY", 2028.1)
-    h.run_until(utc(2026, 11, 17, 8, 10))  # closed at TP3
+    # Five targets on the open scalp's line and in the trade column (S9).
+    assert [live[f"tp{n}"] for n in range(1, 6)] == [2030.6, 2031.2, 2031.8, 2032.4, 2033.0]
+    assert (head["active_tp4"], head["active_tp5"]) == (2032.4, 2033.0)
+    h.run_until(utc(2026, 11, 17, 8, 10))  # closed at TP5
     head, items = panel_lines(path)
     assert (head["status"], head["today_n"]) == ("READY", 1)
     hits = [item["tp"] for item in items if item["k"] == "hit"]
-    assert hits == ["TP1", "TP2", "TP3"]
+    assert hits == ["TP1", "TP2", "TP3", "TP4", "TP5"]
+    (done,) = [item for item in items if item["k"] == "scalp"]
+    assert (done["tp4"], done["tp5"], done["exit"]) == (2032.4, 2033.0, "tp5")
 
 
 def test_the_panel_buttons_reach_the_bot(settings: Settings, db: Database, tmp_path: Path) -> None:

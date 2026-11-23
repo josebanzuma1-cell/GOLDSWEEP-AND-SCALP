@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import io
+import json
 import math
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -36,7 +37,7 @@ from goldsweep.scalping.runner import ScalpContext, built_modes, demo_executor
 from goldsweep.storage.db import Database
 from tests.fake_mt5 import gold_symbol
 from tests.fake_mt5_trading import FakeTradingMT5
-from tests.helpers import bars, only_spec_model, quiet, utc
+from tests.helpers import bars, only_spec_model, quiet, utc, without_grade_filter
 
 MINUTE = dt.timedelta(minutes=1)
 DAY = utc(2026, 11, 17)  # a Tuesday; London runs 07:00-10:00 UTC in November
@@ -44,16 +45,16 @@ SIGNAL_BAR = utc(2026, 11, 17, 7, 59)  # closes at 08:00 inside London
 START = utc(2026, 11, 17, 7, 30, 2)  # two seconds after the 07:29 M1 bar closes
 RISE = [
     (2030.0, 2030.4, 2029.9, 2030.2),  # 08:00: the scalp fills at this open
-    (2030.2, 2031.0, 2030.1, 2030.9),  # 08:01: TP1 2030.95
-    (2030.9, 2032.0, 2030.8, 2031.9),  # 08:02: TP2 2031.90
-    (2031.9, 2033.0, 2031.8, 2032.9),  # 08:03: TP3 2032.85
+    (2030.2, 2031.0, 2030.1, 2030.9),  # 08:01: TP1 2030.60
+    (2030.9, 2032.0, 2030.8, 2031.9),  # 08:02: TP2 2031.20, TP3 2031.80
+    (2031.9, 2033.0, 2031.8, 2032.9),  # 08:03: TP4 2032.40, TP5 2033.00 (S9's ladder)
 ]
 M1 = bars(quiet(120, 2030.0) + RISE + quiet(60, 2032.9), utc(2026, 11, 17, 6, 0), minutes=1)
 
 
 @pytest.fixture
 def settings(settings: Settings) -> Settings:
-    return only_spec_model(settings)
+    return without_grade_filter(only_spec_model(settings))
 
 
 @pytest.fixture
@@ -169,18 +170,27 @@ def test_a_paper_scalp_is_opened_managed_closed_and_stored(
     h.scalper_on()
     h.run_until(utc(2026, 11, 17, 8, 10))
     placed, closed = h.notes.sent
-    # The stop 0.10 ATR beyond the sweep's X (2028.30); targets 0.5 R apart.
+    # The stop 0.10 ATR beyond the sweep's X (2028.30). Five targets (S9): HFT's 0.25 R
+    # step (0.475) is widened to 0.60 so TP1 clears twice the round-trip cost (0.30).
     assert placed == (
         "⚡ Scalp HFT LONG 2026-11-17-HFT-001 (paper, 0.13 lots): market | SL 2028.10 | "
-        "TP 2030.95 / 2031.90 / 2032.85\n"
+        "TP 2030.60 / 2031.20 / 2031.80 / 2032.40 / 2033.00\n"
         "asia low 2028.50 swept to 2028.30, closed back inside, structure shift"
     )
-    # Filled at the 08:00 open, out at TP3 on the 08:03 bar (closing 08:04).
+    # Filled at the 08:00 open, out at TP5 on the 08:03 bar (closing 08:04).
     assert closed == (
-        "🏁 Scalp HFT 2026-11-17-HFT-001 closed (tp3, paper) after 4m: +$20.80 (+0.73 R)"
+        "🏁 Scalp HFT 2026-11-17-HFT-001 closed (tp5, paper) after 4m: +$17.70 (+0.62 R)"
     )
-    (row,) = db.query("SELECT id, direction, session, exit_reason, lots FROM scalp_trades")
-    assert row == ("2026-11-17-HFT-001", "LONG", "london", "tp3", 0.13)
+    (row,) = db.query("SELECT id, direction, session, exit_reason, lots, legs FROM scalp_trades")
+    assert row[:5] == ("2026-11-17-HFT-001", "LONG", "london", "tp5", 0.13)
+    # 0.13 lots in five parts, whole steps, the largest remainders first: 3/3/3/2/2.
+    assert [(leg["lots"], leg["reason"]) for leg in json.loads(row[5])] == [
+        (0.03, "tp1"),
+        (0.03, "tp2"),
+        (0.03, "tp3"),
+        (0.02, "tp4"),
+        (0.02, "tp5"),
+    ]
     assert db.query("SELECT COUNT(*) FROM paper_trades") == [(0,)]  # the main book: untouched
     paper = h.hft.paper
     assert paper.equity > 10_000.0 and paper.open_positions == []
@@ -203,7 +213,7 @@ def test_a_restart_resumes_the_open_scalp(settings: Settings, db: Database) -> N
     assert len(restarted.hft.paper.open_positions) == 1
     restarted.run_until(utc(2026, 11, 17, 8, 10))
     (closed,) = restarted.notes.sent
-    assert "closed (tp3, paper)" in closed
+    assert "closed (tp5, paper)" in closed
 
 
 @pytest.mark.parametrize(
@@ -385,27 +395,28 @@ def test_an_approved_mode_sends_scalps_to_the_demo_account(
     # Sized at the ask (2030.21): 0.25% of 10,000 over 2.11 a unit is 0.11 lots.
     assert placed.startswith("⚡ Scalp HFT LONG 2026-11-17-HFT-001 (demo account, 0.11 lots)")
     positions = sorted(demo.fake.open_positions.values(), key=lambda p: p.ticket)
-    assert [(p.magic, p.sl, p.tp) for p in positions] == [
-        (SCALP_MAGIC, 2028.1, 2030.95),
-        (SCALP_MAGIC, 2028.1, 2031.9),
-        (SCALP_MAGIC, 2028.1, 2032.85),
+    # Five parts (S9), each its own position with the stop and its own target.
+    assert [(p.magic, p.volume, p.sl, p.tp) for p in positions] == [
+        (SCALP_MAGIC, 0.03, 2028.1, 2030.6),
+        (SCALP_MAGIC, 0.02, 2028.1, 2031.2),
+        (SCALP_MAGIC, 0.02, 2028.1, 2031.8),
+        (SCALP_MAGIC, 0.02, 2028.1, 2032.4),
+        (SCALP_MAGIC, 0.02, 2028.1, 2033.0),
     ]
     assert [p.comment for p in positions] == [
-        "GS-SC|2026-11-17-HFT-001|1",
-        "GS-SC|2026-11-17-HFT-001|2",
-        "GS-SC|2026-11-17-HFT-001|3",
+        f"GS-SC|2026-11-17-HFT-001|{part}" for part in range(1, 6)
     ]
     assert all(r["sl"] and r["tp"] for r in demo.fake.sent)  # never an order without both
     assert demo.main.open_positions == []  # the main strategy's book is not involved
-    # TP1, then TP2 and TP3 at the broker; the scalp is stored in its own table.
-    for bid in (2031.00, 2031.95, 2032.90):
+    # TP1 to TP5 at the broker; the scalp is stored in its own table.
+    for bid in (2031.00, 2031.95, 2033.05):
         demo.fake.quote(bid)
         h.clock.advance(MINUTE)
         h.trader.scalper_tick()
     closed = h.notes.sent[-1]
-    assert closed.startswith("🏁 Scalp HFT 2026-11-17-HFT-001 closed (tp3, demo account)")
+    assert closed.startswith("🏁 Scalp HFT 2026-11-17-HFT-001 closed (tp5, demo account)")
     assert db.query("SELECT id, exit_reason FROM scalp_live_trades") == [
-        ("2026-11-17-HFT-001", "tp3")
+        ("2026-11-17-HFT-001", "tp5")
     ]
     assert db.query("SELECT COUNT(*) FROM live_trades") == [(0,)]
 
@@ -415,7 +426,7 @@ def test_the_main_strategy_closes_an_opposite_scalp_first(settings: Settings, db
     h.scalper_on()
     h.say("approve", "scalper hft")
     h.run_until(utc(2026, 11, 17, 8, 0))
-    assert len(demo.fake.open_positions) == 3
+    assert len(demo.fake.open_positions) == 5
     short = TradePlan(
         id="2026-11-17-LDN-01",
         time=utc(2026, 11, 17, 8, 5),
@@ -630,4 +641,11 @@ def test_unarmed_the_demo_executor_leaves_positions_to_their_stops(
 def test_scalp_context_on_paper(settings: Settings, db: Database) -> None:
     h = Harness(settings, db)
     context = h.trader._scalp_context(h.clock.now())  # noqa: SLF001
-    assert context == ScalpContext(mode="off", may_open=False, demo=False, events=())
+    assert context == ScalpContext(
+        mode="off",
+        may_open=False,
+        demo=False,
+        events=(),
+        modes=frozenset(),
+        demo_modes=frozenset(),
+    )

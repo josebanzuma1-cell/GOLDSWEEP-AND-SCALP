@@ -60,7 +60,9 @@ from goldsweep.execution.book import (
     close_by_due,
     ladder_stop,
     plan_legs,
+    previous_target,
     step_trailed_stop,
+    target_number,
     time_stop_due,
     to_ns,
     trailed_stop,
@@ -205,6 +207,13 @@ class _Group:
     time_checked: bool = False
     stop_offset: float = 0.0
     close_reason: ExitReason | None = None
+    reached: int = 0  # the highest target reached (1..5; D115)
+
+    def reach(self, reason: ExitReason) -> None:
+        """Note a take-profit exit (the ladder rule follows the highest one)."""
+        self.reached = max(self.reached, target_number(reason))
+        self.tp1_done = self.tp1_done or self.reached >= 1
+        self.tp2_done = self.tp2_done or self.reached >= 2
 
     @property
     def long(self) -> bool:
@@ -237,6 +246,7 @@ class _Group:
             "time_checked": self.time_checked,
             "stop_offset": self.stop_offset,
             "close_reason": self.close_reason.value if self.close_reason else None,
+            "reached": self.reached,
         }
 
     @classmethod
@@ -259,6 +269,7 @@ class _Group:
             time_checked=data.get("time_checked", False),
             stop_offset=data.get("stop_offset", 0.0),
             close_reason=ExitReason(data["close_reason"]) if data.get("close_reason") else None,
+            reached=data.get("reached", 2 if data.get("tp2_done") else int(bool(data["tp1_done"]))),
         )
 
 
@@ -564,10 +575,7 @@ class MT5Executor(Executor):
                     continue
                 part.closed = leg
                 self.manager.book(leg.exit_time, leg.pnl)
-                if leg.reason is ExitReason.TP1:
-                    group.tp1_done = True
-                elif leg.reason is ExitReason.TP2:
-                    group.tp2_done = True
+                group.reach(leg.reason)
                 closed_now.append(part)
                 changed = True
             events += self._group_events(group, closed_now)
@@ -891,11 +899,13 @@ class MT5Executor(Executor):
             if plus is not None:  # each part's stop is its own fill plus the offset
                 group.stop_offset = rules.breakeven_offset
                 group.stop = plus
-        if rules.stop_to_tp1_after_tp2 and group.tp2_done:
+        # After TP k (k >= 2) the stop goes to TP k-1 (the ladder, D115).
+        previous = previous_target(plan, max(group.reached, 2 * group.tp2_done))
+        if rules.stop_to_tp1_after_tp2 and previous is not None:
             level = ladder_stop(
                 long=long,
                 stop=group.stop,
-                take_profit_1=plan.take_profit_1,
+                take_profit_1=previous,
                 close=bar.close,
                 spread=bar.spread,
             )

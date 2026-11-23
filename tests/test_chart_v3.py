@@ -31,7 +31,7 @@ from goldsweep.scalping.runner import Decision
 from goldsweep.scalping.stats import summarize
 from goldsweep.scalping.swing_scalp import SwingScalpEngine
 from goldsweep.storage.db import Database
-from tests.helpers import only_spec_model, utc
+from tests.helpers import only_spec_model, utc, without_grade_filter
 from tests.test_paper import MARKET, START
 from tests.test_scalp_chart import PanelHarness, chart_time, panel_lines
 from tests.test_scalper_runner import SIGNAL_BAR, setup_at
@@ -41,7 +41,7 @@ PROJECT = Path(__file__).parents[1]
 
 @pytest.fixture
 def settings(settings: Settings) -> Settings:
-    return only_spec_model(settings)
+    return without_grade_filter(only_spec_model(settings))
 
 
 # --------------------------------------------------------------------------- #
@@ -331,7 +331,7 @@ def test_the_buttons_switch_strategies_and_modes(
 
 def test_the_indicator_v3() -> None:
     source = (PROJECT / "mt5" / "GoldSweepPanel.mq5").read_text(encoding="utf-8")
-    assert '#property version     "3.00"' in source
+    assert '#property version     "3.10"' in source  # v3.1: S9's toggles, TP4/TP5
     assert source.count("FILE_WRITE") == 1 and "InpCommandFile, FILE_WRITE" in source
     for word in ("OrderSend", "CTrade", "PositionClose", "TRADE_ACTION", "OrderSendAsync"):
         assert word not in source  # it never trades

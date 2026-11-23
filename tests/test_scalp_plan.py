@@ -142,9 +142,14 @@ def test_three_children_forty_thirty_thirty() -> None:
         plan.take_profit_2,
         plan.take_profit_3,
     ]
-    # Too few lots to split: never below the broker's minimum, all of it at TP1.
-    (single,) = plan_legs(plan, 0.02, spec, risk, split=split)
-    assert (single.lots, single.reason) == (0.02, ExitReason.TP1)
+    # Few lots: whole volume steps, the largest shares first, never below the minimum.
+    legs = plan_legs(plan, 0.02, spec, risk, split=split)
+    assert [(leg.lots, leg.reason) for leg in legs] == [
+        (0.01, ExitReason.TP1),
+        (0.01, ExitReason.TP2),
+    ]
+    (single,) = plan_legs(plan, 0.01, spec, risk, split=split)
+    assert (single.lots, single.reason) == (0.01, ExitReason.TP1)
 
 
 def test_the_scalper_risk_settings_and_management(settings: Settings) -> None:

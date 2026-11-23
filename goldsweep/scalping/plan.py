@@ -5,7 +5,8 @@
   rejection wick); when that stop is outside ``sl_min_atr``..``sl_max_atr`` x ATR
   from the entry, the step-trail line is tried instead; when neither fits, no trade.
 * **Ladder.** ``TPn = entry +/- n x step`` with ``step = tp_step_r x R``: 0.5 gives
-  TP1/TP2/TP3 at 0.5/1.0/1.5 R. One target per child (``split``).
+  TP1/TP2/TP3 at 0.5/1.0/1.5 R. One target per child (``split``, up to five: the HFT
+  mode passes its own ``scalper.hft`` split and step, D115).
 * **Cost gate.** TP1 must be at least ``cost_multiple`` x the round-trip cost away
   (spread, the market entry's slippage, commission). If it is not, the step widens up
   to ``tp_step_r_max``; beyond that, no trade.
@@ -106,8 +107,15 @@ def scalp_plan(
     plan_id: str,
     session: str | None,
     bar: dt.timedelta,
+    split: tuple[float, ...] | None = None,
+    step_r: float | None = None,
 ) -> ScalpPlan:
-    """The market order for ``setup``, entered at the next bar's open."""
+    """The market order for ``setup``, entered at the next bar's open.
+
+    ``split`` and ``step_r`` default to ``config.split`` and ``config.tp_step_r``; one
+    target is made per share (at most five).
+    """
+    shares = split if split is not None else config.split
     sign = setup.direction.sign
     atr = setup.atr
     buffer = config.sl_buffer_atr * atr
@@ -135,7 +143,7 @@ def scalp_plan(
             f"no stop within {config.sl_min_atr:g}-{config.sl_max_atr:g} ATR ({found})",
         )
     risk = abs(setup.reference - stop)
-    step_r = config.tp_step_r
+    step_r = step_r if step_r is not None else config.tp_step_r
     needed = config.risk.cost_multiple * costs.round_trip
     if step_r * risk < needed - _EPSILON:
         step_r = needed / risk
@@ -146,9 +154,9 @@ def scalp_plan(
                 f"({costs.round_trip:.2f}) within {config.tp_step_r_max:g} R steps",
             )
     targets: list[float | None] = [
-        setup.reference + sign * (n + 1) * step_r * risk for n in range(len(config.split))
+        setup.reference + sign * (n + 1) * step_r * risk for n in range(len(shares))
     ]
-    targets += [None] * (3 - len(targets))
+    targets += [None] * (5 - len(targets))
     first = targets[0]
     assert first is not None
     plan = TradePlan(
@@ -162,6 +170,8 @@ def scalp_plan(
         take_profit_1=first,
         take_profit_2=targets[1],
         take_profit_3=targets[2],
+        take_profit_4=targets[3],
+        take_profit_5=targets[4],
         expires_at=setup.time + bar,
         score=setup.score,
         risk_reward_1=step_r,

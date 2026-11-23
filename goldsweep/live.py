@@ -69,8 +69,9 @@ from goldsweep.analysis.refine import (
     RefineStatus,
     refine,
 )
-from goldsweep.analysis.signals import MODELS, Signal, SignalEngine
+from goldsweep.analysis.signals import MODELS, FormingSetup, Signal, SignalEngine
 from goldsweep.analysis.smt import with_smt
+from goldsweep.analysis.structure import Direction
 from goldsweep.analysis.zones import open_gaps
 from goldsweep.backtest.engine import spread_points as cost_spreads
 from goldsweep.backtest.simulator import TrailLevels
@@ -98,9 +99,17 @@ from goldsweep.risk.risk_manager import NewsEvent
 from goldsweep.scalping import modes as scalper_modes
 from goldsweep.scalping import stats as scalper_stats
 from goldsweep.scalping.chart import PANEL_COMMANDS, ScalpPanel
+from goldsweep.scalping.grade_filter import GradedSetup, accepts
 from goldsweep.scalping.logic import ChartMarks
-from goldsweep.scalping.modes import MODE_NAMES
+from goldsweep.scalping.modes import (
+    MODE_NAMES,
+    all_selections,
+    modes_key,
+    ordered,
+    parse_modes,
+)
 from goldsweep.scalping.runner import (
+    Decision,
     ScalpContext,
     ScalperRunner,
     built_modes,
@@ -120,12 +129,13 @@ HEARTBEAT_KEY = "dashboard.heartbeat"
 HEARTBEAT_EVERY = dt.timedelta(seconds=10)
 #: Dashboard commands older than this are not carried out (the bot was not running).
 COMMAND_MAX_AGE = dt.timedelta(minutes=2)
-#: The strategy and scalper-mode switch (D103), as "name:argument" for the dashboard.
+#: The strategy and scalper-mode switch (D103, D115), as "name:argument" for the
+#: dashboard: ``scalper:off`` and every combination of modes (``scalper:hft,swing``).
 SWITCH_COMMANDS = (
     "mode:main",
     "mode:scalper",
     "mode:both",
-    *(f"scalper:{mode}" for mode in ("off", *MODE_NAMES)),
+    *(f"scalper:{key}" for key in all_selections()),
 )
 DASHBOARD_COMMANDS = ("pause", "resume", "stop", "status", *SWITCH_COMMANDS)
 #: M5 bars kept in SQLite for the dashboard chart.
@@ -152,7 +162,8 @@ ASKED_KEY = "playbooks.asked"
 #: on Telegram or the dashboard (config.yaml ``switch:`` until then); and the scalper
 #: modes the owner approved for trading. Shared by paper and live, like approvals.
 STRATEGIES_KEY = "switch.strategies"
-SCALPER_MODE_KEY = "switch.scalper_mode"
+SCALPER_MODES_KEY = "switch.scalper_modes"  # a list: one, two or all three modes (S9)
+SCALPER_MODE_KEY = "switch.scalper_mode"  # S5-S8's single mode, read when no list is set
 SCALPER_APPROVED_KEY = "scalper.approved"
 STRATEGY_CHOICES = ("main", "scalper", "both")
 #: The last chart-panel command carried out (S7, D113).
@@ -352,6 +363,8 @@ class Trader:
         self._last_bar = dt.datetime.fromisoformat(saved) if saved else None
         self._market: dict[str, Any] = {}
         self._snapshot_market: dict[str, Any] = {}
+        #: Setups forming on the last M5 bar, each with "A+ possible" (S8, S9).
+        self._forming: list[tuple[FormingSetup, bool]] = []
         self._last_heartbeat: dt.datetime | None = None
 
     # -- setup models and confluence (D85) ------------------------------------------ #
@@ -413,12 +426,22 @@ class Trader:
         return str(value) if value in STRATEGY_CHOICES else self._config.switch.strategies
 
     @property
+    def scalper_modes(self) -> tuple[str, ...]:
+        """The selected scalper modes: one, two or all three (``()``: off; S9, D115)."""
+        value = self._db.get_state(SCALPER_MODES_KEY)
+        if isinstance(value, list) and all(name in MODE_NAMES for name in value):
+            return ordered(value)
+        single = self._db.get_state(SCALPER_MODE_KEY)  # S5-S8 kept one mode
+        if single == "off":
+            return ()
+        if single in MODE_NAMES:
+            return (str(single),)
+        return ordered(self._config.switch.modes)
+
+    @property
     def scalper_mode(self) -> str:
-        """off / hft / intraday / swing."""
-        value = self._db.get_state(SCALPER_MODE_KEY)
-        if value == "off" or value in MODE_NAMES:
-            return str(value)
-        return self._config.switch.scalper_mode
+        """The selection as text: ``off``, ``hft`` or ``hft,swing``."""
+        return modes_key(self.scalper_modes)
 
     def _scalper_approved(self, mode: str) -> bool:
         return mode in self._db.get_state(SCALPER_APPROVED_KEY, [])
@@ -442,36 +465,49 @@ class Trader:
         return f"✅ Both strategies may open trades, side by side.{note}"
 
     def _scalper_note(self) -> str:
-        mode = self.scalper_mode
-        if mode == "off":
-            return " The scalper's mode is off: send /scalper hft, intraday or swing."
-        info = scalper_modes.REGISTRY[mode]
-        if not info.built:
-            return f" Its {mode} mode is not built yet (phase {info.phase}): nothing runs."
-        if self._scalps_to_demo(mode):
-            return f" Its {mode} mode trades on the demo account."
-        if not self._scalper_approved(mode):
-            return f" Its {mode} mode runs on paper until /approve scalper {mode}."
-        return f" Its {mode} mode runs on paper."
+        modes = self.scalper_modes
+        if not modes:
+            return (
+                " The scalper's mode is off: send /scalper hft, intraday or swing "
+                "(or several: /scalper hft,swing, /scalper all)."
+            )
+        notes = []
+        for mode in modes:
+            info = scalper_modes.REGISTRY[mode]
+            if not info.built:
+                notes.append(f"{mode} mode is not built yet (phase {info.phase}): nothing runs")
+            elif self._scalps_to_demo(mode):
+                notes.append(f"{mode} mode trades on the demo account")
+            elif not self._scalper_approved(mode):
+                notes.append(f"{mode} mode runs on paper until /approve scalper {mode}")
+            else:
+                notes.append(f"{mode} mode runs on paper")
+        return " Its " + "; its ".join(notes) + "."
 
     def _set_scalper_mode(self, argument: str) -> str:
+        """``/scalper off | hft | hft,swing | all``: one, two or all three modes (S9)."""
         choice = argument.strip().lower()
+        usage = (
+            "Send /scalper off, /scalper hft, /scalper intraday or /scalper swing; several "
+            "at once as /scalper hft,swing; every mode as /scalper all."
+        )
         if not choice:
-            return (
-                f"Scalper mode: {self._scalper_line()}. Send /scalper off, hft, intraday or swing."
-            )
-        if choice != "off" and choice not in MODE_NAMES:
-            return "Send /scalper off, /scalper hft, /scalper intraday or /scalper swing."
-        self._db.set_state(SCALPER_MODE_KEY, choice)
-        log.info("scalper mode switched", mode=choice)
-        if choice == "off":
+            return f"Scalper mode: {self._scalper_line()}. {usage}"
+        modes = parse_modes(choice)
+        if modes is None:
+            return usage
+        self._db.set_state(SCALPER_MODES_KEY, list(modes))
+        log.info("scalper modes switched", modes=modes_key(modes))
+        if not modes:
             return "✅ Scalper off: no scalper mode runs."
-        line = scalper_modes.describe(
-            choice, selected=choice, approved=self._scalps_to_demo(choice)
+        line = "; ".join(
+            scalper_modes.describe(mode, selected=modes, approved=self._scalps_to_demo(mode))
+            for mode in modes
         )
         if self.strategies == "main":
             line += ". The scalper may not trade while /mode is main"
-        return f"✅ Scalper mode: {line}."
+        head = "Scalper mode" if len(modes) == 1 else f"Scalper modes ({len(modes)} side by side)"
+        return f"✅ {head}: {line}."
 
     @property
     def scalper_line(self) -> str:
@@ -479,10 +515,13 @@ class Trader:
         return self._scalper_line()
 
     def _scalper_line(self) -> str:
-        mode = self.scalper_mode
-        if mode == "off":
+        modes = self.scalper_modes
+        if not modes:
             return "off"
-        return scalper_modes.describe(mode, selected=mode, approved=self._scalps_to_demo(mode))
+        return "; ".join(
+            scalper_modes.describe(mode, selected=modes, approved=self._scalps_to_demo(mode))
+            for mode in modes
+        )
 
     def _approve_scalper(self, mode: str) -> str:
         """``/approve scalper <mode>``: a built mode sends its orders to the demo account
@@ -532,24 +571,85 @@ class Trader:
         return self.label == "LIVE DEMO" or self._scalp_lock.exists()
 
     def _scalp_context(self, now: dt.datetime) -> ScalpContext:
-        mode = self.scalper_mode
-        info = scalper_modes.REGISTRY.get(mode)
-        may_open = (
-            self.trading == ACTIVE
-            and self.strategies in ("scalper", "both")
-            and info is not None
-            and info.built
-        )
-        demo = self._scalps_to_demo(mode)
+        built = frozenset(m for m in self.scalper_modes if scalper_modes.REGISTRY[m].built)
+        may_open = self.trading == ACTIVE and self.strategies in ("scalper", "both") and bool(built)
+        demo_modes = frozenset(m for m in built if self._scalps_to_demo(m))
+        demo = bool(demo_modes)
         return ScalpContext(
-            mode=mode,
+            mode=modes_key(built),
             may_open=may_open,
             demo=demo,
             events=self._news.blackouts(now) if self._news else (),
-            # On the demo account the scalp shares the account with the main strategy.
+            # On the demo account the scalps share the account with the main strategy.
             main_exposures=ScalperRunner.exposures(self.executor) if demo else None,
             equity=self.executor.equity if demo else 0.0,
+            modes=built,
+            demo_modes=demo_modes,
+            hft_setups=self._hft_setups(now) if "hft" in built else None,
         )
+
+    def _hft_setups(self, now: dt.datetime) -> list[GradedSetup] | None:
+        """The main strategy's A/A+ setups HFT may follow (S9, D115); None: no filter.
+
+        Signals graded A or A+ (``scalper.hft.grade_filter``) in the last
+        ``a_window_min`` minutes, with their last target, the sweep's extreme and
+        whether their trade has closed (the runner judges which are still live), plus
+        the setups forming now that can still become an A+ ("A+ possible").
+        """
+        hft = self._config.scalper.hft
+        if hft.grade_filter == "off":
+            return None
+        since = now - dt.timedelta(minutes=hft.a_window_min)
+        rows = self._db.query(
+            "SELECT id, time, direction, stop_loss, take_profit_1, take_profit_2, detail "
+            "FROM signals WHERE time >= ? ORDER BY time",
+            (int(since.timestamp()),),
+        )
+        trades = self.executor.trades_between(since, now + dt.timedelta(minutes=1))
+        closed = {row.id for row in trades}
+        setups: list[GradedSetup] = []
+        for signal_id, epoch, direction, stop, tp1, tp2, detail_text in rows:
+            detail = json.loads(detail_text or "{}")
+            grade_text = detail.get("grade")
+            if not accepts(grade_text, hft.grade_filter):
+                continue
+            last = detail.get("take_profit_3") or tp2 or tp1
+            sweep = detail.get("sweep_x")
+            setups.append(
+                GradedSetup(
+                    id=signal_id,
+                    time=dt.datetime.fromtimestamp(int(epoch), tz=dt.UTC),
+                    direction=Direction(direction),
+                    grade="A+" if str(grade_text).startswith("A+") else "A",
+                    target=float(last) if last is not None else None,
+                    invalid=float(sweep if sweep is not None else stop),
+                    closed=signal_id in closed,
+                )
+            )
+        setups += [
+            GradedSetup(
+                id=f"forming-{raid.model}-{raid.since:%H%M}",
+                time=raid.since,
+                direction=raid.direction,
+                grade="A+ possible",
+                forming=True,
+            )
+            for raid, a_plus in self._forming
+            if a_plus
+        ]
+        return setups
+
+    def _forming_now(
+        self, trigger: pd.DataFrame, session: str | None
+    ) -> list[tuple[FormingSetup, bool]]:
+        """Setups forming on the newest M5 bar, each with "A+ possible" (S8, D114)."""
+        found: list[tuple[FormingSetup, bool]] = []
+        for name, engine in self._engines():
+            if not getattr(self._config.models, name).enabled:
+                continue
+            for raid in engine.forming(trigger):
+                found.append((raid, a_plus_possible(raid, self._config.playbooks, session)))
+        return found
 
     def scalper_tick(self) -> None:
         """Each minute: the scalper's new M1 bars, its open scalps and any new scalp."""
@@ -562,23 +662,41 @@ class Trader:
         if self._scalp_panel is not None:
             self._write_scalp_panel(now)
 
-    def _scalper_status(self, mode: str) -> str:
-        """OFF / PAUSED / IN TRADE / READY, for the chart's dashboard box."""
-        slot = self.scalper.slots.get(mode)
-        if slot is None or self.strategies == "main":
+    def _scalper_status(self, modes: Sequence[str]) -> str:
+        """OFF / PAUSED / IN TRADE / READY over the selected modes, for the chart's box."""
+        slots = [self.scalper.slots[m] for m in modes if m in self.scalper.slots]
+        if not slots or self.strategies == "main":
             return "OFF"
         if self.trading != ACTIVE:
             return "PAUSED"
-        if any(executor.open_positions for executor in slot.executors):
+        if any(e.open_positions for slot in slots for e in slot.executors):
             return "IN TRADE"
         return "READY"
+
+    def _where(self, modes: Sequence[str]) -> str:
+        """paper / demo / paper+demo: where the selected modes' new scalps go."""
+        places = {"demo" if self._scalps_to_demo(m) else "paper" for m in modes}
+        return "+".join(sorted(places)) if places else "paper"
+
+    def _latest_decision(self, modes: Sequence[str]) -> Decision | None:
+        """The Quick Scalp line: the newest decision of any selected mode (S9)."""
+        found = [
+            slot.decision
+            for name, slot in self.scalper.slots.items()
+            if name in modes and slot.decision is not None
+        ]
+        return max(found, key=lambda d: d.time) if found else None
 
     def _write_scalp_panel(self, now: dt.datetime) -> None:
         """``scalp.json`` for the chart panel (S7, D113). Never stops trading."""
         assert self._scalp_panel is not None
         try:
-            mode = self.scalper_mode
-            slot = self.scalper.slots.get(mode) or self.scalper.slots.get("hft")
+            modes = self.scalper_modes
+            mode = modes_key(modes)
+            slot = next(
+                (self.scalper.slots[m] for m in modes if m in self.scalper.slots),
+                self.scalper.slots.get("hft"),
+            )
             open_scalps = [
                 {**p, "mode": s.name, "where": s.where(e)}
                 for s in self.scalper.slots.values()
@@ -586,9 +704,11 @@ class Trader:
                 for p in e.open_positions
             ]
             month = scalper_stats.closed_scalps(self._db, now - dt.timedelta(days=30), now)
-            mine = [s for s in month if mode == "off" or s.mode == mode]
+            mine = [s for s in month if not modes or s.mode in modes]
             day = [s for s in mine if s.exit_time >= now - dt.timedelta(hours=24)]
-            label = scalper_stats.MODE_LABELS.get(mode, "all modes")
+            label = (
+                " + ".join(scalper_stats.MODE_LABELS[m] for m in modes) if modes else "all modes"
+            )
             try:
                 spread: float | None = float(self._broker.spread_points(self.spec.name))
             except BrokerError:
@@ -607,10 +727,10 @@ class Trader:
             self._scalp_panel.write(
                 now=now,
                 mode=mode,
-                where="demo" if self._scalps_to_demo(mode) else "paper",
+                where=self._where(modes),
                 state=self.trading,
                 strategies=self.strategies,
-                status=self._scalper_status(mode),
+                status=self._scalper_status(modes),
                 marks=slot.logic.chart() if slot is not None else ChartMarks("M1", "-", None),
                 open_scalps=open_scalps,
                 closed=[s for s in month if s.exit_time >= now - dt.timedelta(hours=24)],
@@ -626,14 +746,17 @@ class Trader:
                 news=news,
                 price=self.scalper.last_close,
                 layers={s.name: s.logic.chart() for s in self.scalper.slots.values()},
-                decision=slot.decision if slot is not None and slot.name == mode else None,
-                modes=self._mode_lines(now, mode, month),
+                decision=self._latest_decision(modes),
+                modes=self._mode_lines(now, modes, month),
             )
         except Exception as exc:  # noqa: BLE001 - the chart is a viewer only
             log.warning("scalp panel not written", error=repr(exc))
 
     def _mode_lines(
-        self, now: dt.datetime, selected: str, month: Sequence[scalper_stats.ClosedScalp]
+        self,
+        now: dt.datetime,
+        selected: Sequence[str],
+        month: Sequence[scalper_stats.ClosedScalp],
     ) -> dict[str, str]:
         """One line per scalper mode for the chart's analysis box (S8, D114)."""
         lines: dict[str, str] = {}
@@ -642,7 +765,7 @@ class Trader:
             day = [s for s in month if s.mode == slot.name and s.exit_time >= since]
             total = sum(s.r_multiple for s in day)
             opened = sum(len(e.open_positions) for e in slot.executors)
-            state = "selected" if slot.name == selected else "standby"
+            state = "selected" if slot.name in selected else "standby"
             where = "demo" if self._scalps_to_demo(slot.name) else "paper"
             last = f" | {slot.decision.text}" if slot.decision is not None else ""
             lines[slot.name] = (
@@ -718,12 +841,14 @@ class Trader:
         return lines
 
     def _scalper_picture(self, now: dt.datetime) -> dict[str, Any]:
-        mode = self.scalper_mode
+        modes = self.scalper_modes
         count, total = self.scalper.today(now)
         slots = self.scalper.slots.values()
         return {
-            "mode": mode,
-            "where": "demo" if self._scalps_to_demo(mode) else "paper",
+            "mode": modes_key(modes),
+            "modes": list(modes),
+            "where": self._where(modes),
+            "where_by_mode": {m: "demo" if self._scalps_to_demo(m) else "paper" for m in modes},
             "paper_equity": {slot.name: slot.paper.equity for slot in slots},
             "open": [
                 {**p, "mode": slot.name, "where": slot.where(e)}
@@ -839,6 +964,11 @@ class Trader:
         pressure: PressureReading | None = None
         for signal in signals:
             pressure = self._handle_signal(signal, now, spread, median, bias)
+        try:
+            self._forming = self._forming_now(trigger, self._sessions.status(now).session)
+        except Exception as exc:  # noqa: BLE001 - a view and a filter: signals still go out
+            log.warning("forming setups not read", error=repr(exc))
+            self._forming = []
         self._last_bar = newest
         self._db.set_state(self._state_last_bar, newest.isoformat())
         reading = pressure or self._pressure(hourly, score)
@@ -905,7 +1035,11 @@ class Trader:
                     "orders": [plan.to_state() for plan in self.executor.pending_orders],
                     "risk": self.executor.manager.status(now),
                     "armed": self.executor.armed,
-                    "switch": {"strategies": self.strategies, "scalper": self._scalper_line()},
+                    "switch": {
+                        "strategies": self.strategies,
+                        "scalper": self._scalper_line(),
+                        "scalper_modes": self.scalper_mode,
+                    },
                     "scalper": self._scalper_picture(now),
                 },
             )
@@ -958,24 +1092,20 @@ class Trader:
         strategy = self._config.strategy
         price = float(trigger["close"].iloc[-1])
         current = self._sessions.status(now)
-        forming = []
-        for name, engine in self._engines():
-            if not getattr(self._config.models, name).enabled:
-                continue
-            for raid in engine.forming(trigger):
-                forming.append(
-                    {
-                        "since": raid.since,
-                        "direction": raid.direction.value,
-                        "level": raid.pool.price,
-                        "label": raid.pool.label,
-                        "extreme": raid.extreme,
-                        "stage": raid.stage,
-                        "text": raid.describe,
-                        "a_plus": a_plus_possible(raid, self._config.playbooks, current.session),
-                        "model": raid.model,
-                    }
-                )
+        forming = [
+            {
+                "since": raid.since,
+                "direction": raid.direction.value,
+                "level": raid.pool.price,
+                "label": raid.pool.label,
+                "extreme": raid.extreme,
+                "stage": raid.stage,
+                "text": raid.describe,
+                "a_plus": a_plus,
+                "model": raid.model,
+            }
+            for raid, a_plus in self._forming
+        ]
         resting = [p for p in self.engine.pools if not p.swept]
         above = sorted((p for p in resting if p.price > price), key=lambda p: p.price)[:4]
         below = sorted((p for p in resting if p.price <= price), key=lambda p: -p.price)[:4]

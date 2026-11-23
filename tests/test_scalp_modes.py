@@ -43,7 +43,7 @@ from goldsweep.scalping.logic import (
 from goldsweep.scalping.plan import LadderCosts
 from goldsweep.scalping.swing_scalp import EMA_PULLBACK, RANGE_BREAKOUT, SwingScalpEngine
 from goldsweep.storage.db import Database
-from tests.helpers import utc
+from tests.helpers import utc, without_grade_filter
 from tests.test_scalper_runner import Harness, demo_harness
 from tests.test_settings import load, write_text
 
@@ -54,6 +54,12 @@ SIGNAL = utc(2026, 11, 17, 8, 0)  # the close of the 07:59 M1 bar, inside London
 # --------------------------------------------------------------------------- #
 # Higher timeframes and the H1 trend
 # --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def settings(settings: Settings) -> Settings:
+    """S9's A/A+ filter is off here: these tests follow what a scalp does once placed."""
+    return without_grade_filter(settings)
 
 
 def test_m1_bars_become_m5_bars_at_their_last_minute() -> None:
@@ -397,7 +403,7 @@ def test_a_mode_switched_off_still_manages_its_open_scalp(settings: Settings, db
     h.run_until(utc(2026, 11, 17, 8, 1))  # the HFT scalp is open
     h.say("scalper", "intraday")  # another mode selected: HFT opens nothing new...
     h.run_until(utc(2026, 11, 17, 8, 10))
-    assert "closed (tp3, paper)" in h.notes.sent[-1]  # ...but its scalp ran to the end
+    assert "closed (tp5, paper)" in h.notes.sent[-1]  # ...but its scalp ran to the end
 
 
 def test_an_approved_intraday_mode_trades_on_the_demo_account_with_its_own_magic(

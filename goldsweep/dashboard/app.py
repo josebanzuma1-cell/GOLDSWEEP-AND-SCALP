@@ -27,6 +27,7 @@ if str(_PROJECT) not in sys.path:
 
 from goldsweep.core.settings import PROJECT_ROOT, Settings, load_settings  # noqa: E402
 from goldsweep.dashboard import charts, data  # noqa: E402
+from goldsweep.scalping.modes import MODE_NAMES, modes_key  # noqa: E402
 from goldsweep.storage.db import Database  # noqa: E402
 
 DB_ENV = "GOLDSWEEP_DASHBOARD_DB"
@@ -395,20 +396,26 @@ def control_tab(db: Database, status: data.BotStatus, zone: dt.tzinfo) -> None:
     if cols[2].button("ℹ️ Ask for /status", disabled=not status.alive, key="status"):
         sent = st.session_state["command_id"] = data.send_command(db, "status", now)
     st.divider()
-    st.subheader("Strategies and scalper mode")
+    st.subheader("Strategies and scalper modes")
     switch = data.switch_state(db)
     st.write(
         f"Now: **{switch.get('strategies', 'main')}** may trade; scalper: "
-        f"**{switch.get('scalper', 'off')}**. A selected scalper mode runs on paper; "
-        "/approve scalper <mode> on Telegram sends it to the demo account."
+        f"**{switch.get('scalper', 'off')}**. One, two or all three scalper modes may run "
+        "side by side; a selected mode runs on paper; /approve scalper <mode> on Telegram "
+        "sends it to the demo account."
     )
     cols = st.columns(2)
     strategies = cols[0].selectbox("Strategies that may trade", ["main", "scalper", "both"])
     if cols[0].button("Apply", disabled=not status.alive, key="apply_mode"):
         sent = st.session_state["command_id"] = data.send_command(db, f"mode:{strategies}", now)
-    mode = cols[1].selectbox("Scalper mode", ["off", "hft", "intraday", "swing"])
+    current = [m for m in switch.get("scalper_modes", "off").split(",") if m in MODE_NAMES]
+    chosen = cols[1].multiselect(
+        "Scalper modes (none selected: off)", list(MODE_NAMES), default=current
+    )
     if cols[1].button("Apply", disabled=not status.alive, key="apply_scalper"):
-        sent = st.session_state["command_id"] = data.send_command(db, f"scalper:{mode}", now)
+        sent = st.session_state["command_id"] = data.send_command(
+            db, f"scalper:{modes_key(chosen)}", now
+        )
     st.divider()
     st.subheader("🛑 Kill switch")
     st.write(

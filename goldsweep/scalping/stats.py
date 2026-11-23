@@ -59,9 +59,20 @@ class ClosedScalp:
     @property
     def take_profit_3(self) -> float | None:
         """Every scalper ladder has equal steps: TP3 is one more step past TP2."""
-        if self.take_profit_2 is None:
+        return self.target(3)
+
+    @property
+    def parts(self) -> int:
+        """How many parts (and targets) the scalp had: one per stored leg (up to five)."""
+        return max(1, min(5, len(self.legs))) if self.legs else 3
+
+    def target(self, number: int) -> float | None:
+        """TP ``number`` (1-5) of the equal-step ladder, or None past the last part."""
+        if number == 1:
+            return self.take_profit_1
+        if self.take_profit_2 is None or number > max(self.parts, 3):
             return None
-        return 2 * self.take_profit_2 - self.take_profit_1
+        return self.take_profit_1 + (number - 1) * (self.take_profit_2 - self.take_profit_1)
 
 
 def _utc(epoch: int) -> dt.datetime:

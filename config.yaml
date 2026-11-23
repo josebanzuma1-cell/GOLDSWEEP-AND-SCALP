@@ -298,13 +298,14 @@ confluence:
     symbol_candidates: [XAGUSD, XAGUSD.m, XAGUSDm, SILVER]
     lookback_bars: 24
 
-# Which strategies may open trades, and the scalper's mode (D103, D111). These are the
-# startup defaults; /mode and /scalper on Telegram (or the dashboard) change them
-# while the bot runs. A selected mode runs on paper; /approve scalper <mode> sends its
-# orders to the demo account; unbuilt modes do nothing.
+# Which strategies may open trades, and the scalper's modes (D103, D111, D115). These
+# are the startup defaults; /mode and /scalper on Telegram (or the dashboard and the
+# chart panel) change them while the bot runs. One, two or all three modes may run at
+# once (/scalper hft,swing; /scalper all; /scalper off). A selected mode runs on paper;
+# /approve scalper <mode> sends its orders to the demo account.
 switch:
   strategies: main               # main | scalper | both
-  scalper_mode: "off"            # "off" | hft | intraday | swing (quote "off")
+  scalper_modes: []              # [] = off; any of [hft, intraday, swing]
 
 # The tick recorder (D106): every gold tick from the broker, saved in data/ticks/
 # (about 0.3 MB a busy hour). Off: the owner set it aside (D111); true turns it back on.
@@ -336,10 +337,10 @@ scalper:
   sl_buffer_atr: 0.10
   sl_min_atr: 0.5
   sl_max_atr: 3.0
-  tp_step_r: 0.5                 # TP1/TP2/TP3 at 0.5/1.0/1.5 R; 2.0 = the "wide" ladder
+  tp_step_r: 0.5                 # S1 backtest: TP1/TP2/TP3 at 0.5/1.0/1.5 R (HFT: hft.step_r)
   tp_step_r_max: 2.0
-  split: [0.4, 0.3, 0.3]         # the three children's shares (TP1, TP2, TP3)
-  adaptive_trail: true           # breakeven+ after TP1, stop to TP1 after TP2, step trail
+  split: [0.4, 0.3, 0.3]         # intraday and swing: TP1, TP2, TP3 (HFT: hft.split)
+  adaptive_trail: true           # breakeven+ after TP1, stop to TP k-1 after TP k, step trail
   risk:
     risk_per_scalp_pct: 0.25     # all three children together
     max_scalps_per_day: 8
@@ -407,5 +408,14 @@ scalper:
   h1_trend:
     ema_hours: 50                # the last H1 close beyond a 50-hour EMA...
     slope_hours: 5               # ...that has moved that way over 5 hours
+  # HFT bursts (S9, D115): each HFT scalp is one trade in five parts on a quick ladder,
+  # 0.25% risk for all five together, taken only with an A or A+ setup's direction.
+  # After TP1 the stop goes past the entry, after TP k to TP k-1.
+  hft:
+    split: [0.2, 0.2, 0.2, 0.2, 0.2]   # TP1..TP5, in whole lot steps
+    step_r: 0.25                 # TP1..TP5 at 0.25/0.5/0.75/1.0/1.25 R (cost gate may widen)
+    grade_filter: a              # a (A or A+) | a_plus (A+ only) | "off" (any direction)
+    a_window_min: 60             # an A/A+ setup allows HFT its way for at most 60 minutes,
+                                 # and only until it reaches its target, is stopped or closed
 
 display_timezone: Africa/Kampala

@@ -16,7 +16,7 @@ from goldsweep.core.settings import Settings
 from goldsweep.dashboard import data
 from goldsweep.live import (
     SCALPER_APPROVED_KEY,
-    SCALPER_MODE_KEY,
+    SCALPER_MODES_KEY,
     STRATEGIES_KEY,
 )
 from goldsweep.scalping import modes
@@ -98,7 +98,7 @@ def test_scalper_modes_that_are_not_built_do_nothing(settings: Settings, db: Dat
         "✅ Scalper mode: swing scalping (M15, hours to two days): selected, not built yet "
         "(phase S6): nothing runs. The scalper may not trade while /mode is main."
     )
-    assert db.get_state(SCALPER_MODE_KEY) == "swing"
+    assert db.get_state(SCALPER_MODES_KEY) == ["swing"]
     assert "scalper: swing scalping (M15, hours to two days): selected, not built" in (
         h.trader.status()
     )
@@ -155,13 +155,17 @@ def test_mode_states(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_the_dashboard_switches_too(settings: Settings, db: Database) -> None:
     h = Harness(settings, db)
     h.run_until(utc(2026, 11, 17, 7, 35))  # a snapshot exists
-    assert data.switch_state(db) == {"strategies": "main", "scalper": "off"}
+    assert data.switch_state(db) == {
+        "strategies": "main",
+        "scalper": "off",
+        "scalper_modes": "off",
+    }
     now = h.clock.now()
     data.send_command(db, "mode:both", now)
     data.send_command(db, "scalper:intraday", now)
     h.trader.dashboard_job()
     assert db.get_state(STRATEGIES_KEY) == "both"
-    assert db.get_state(SCALPER_MODE_KEY) == "intraday"
+    assert db.get_state(SCALPER_MODES_KEY) == ["intraday"]
     assert any(n.startswith("🖥 Dashboard /mode both: ✅ Both strategies") for n in h.notes.sent)
     assert data.switch_state(db)["strategies"] == "both"
     with pytest.raises(ValueError, match="unknown command"):

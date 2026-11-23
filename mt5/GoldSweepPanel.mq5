@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| GoldSweepPanel.mq5  (v3, S8)                                     |
+//| GoldSweepPanel.mq5  (v3.1, S9)                                   |
 //| GoldSweep's trading picture on the gold chart.                   |
 //|                                                                  |
 //| Main strategy (Common\Files\GoldSweep\signals.json, rewritten by |
@@ -13,19 +13,21 @@
 //| Scalper (Common\Files\GoldSweep\scalp.json, rewritten every      |
 //| minute): the HFT step line, sweep "x" marks, each mode's own     |
 //| layer (VWAP and ranges intraday, EMA and channel swing), every   |
-//| scalp's box with TP hits and result, and the dashboard with the  |
-//| Quick Scalp line. It says STALE when the file stops updating.    |
+//| scalp's box with its targets (TP1-TP5 for HFT's quick ladder),   |
+//| TP hits and result, and the dashboard with the Quick Scalp line. |
+//| It says STALE when the file stops updating.                      |
 //|                                                                  |
 //| Optional: GoldSweep's chart theme (your colours come back when   |
 //| the indicator is removed) and alerts for new A+ setups.          |
 //|                                                                  |
 //| It never trades. Its only output is Common\Files\GoldSweep\      |
 //| scalp_commands.json: the buttons (pause / resume, strategies,    |
-//| scalper mode) write one command line there, which the bot        |
-//| carries out like a Telegram command (D99, D113, D114).           |
+//| scalper modes: HFT, Intraday and Swing each switch on or off, so |
+//| one, two or all three run) write one command line there, which   |
+//| the bot carries out like a Telegram command (D99, D113-D115).    |
 //+------------------------------------------------------------------+
 #property copyright   "GoldSweep"
-#property version     "3.00"
+#property version     "3.10"
 #property description "GoldSweep: graded signals, forming A+ setups, levels, scalper layers, analysis."
 #property description "Never trades. Reads Common\\Files\\GoldSweep\\signals.json and scalp.json."
 #property indicator_chart_window
@@ -111,6 +113,7 @@ input color  InpPanelBack     = C'14,17,22';      // Panels background
 
 #define PREFIX  "GS_"
 #define SPREFIX "GSS_"
+#define DASH_HEIGHT 192   // the scalper box: six rows for TP1-TP5 (S9)
 #define APREFIX "GSA_"
 #define THEME   "GSTheme_"
 
@@ -193,6 +196,10 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
    StringReplace(command, "_", ":");
    if(command == "pause" && g_state != "active")
       command = "resume";
+   // HFT, Intraday and Swing switch one mode on or off; the bot gets the whole list
+   // ("scalper:hft,swing"), "Off" clears it (S9: one, two or all three modes).
+   if(StringFind(command, "scalper:") == 0 && command != "scalper:off")
+      command = "scalper:" + ToggleMode(g_mode, StringSubstr(command, 8));
    ObjectSetInteger(0, sparam, OBJPROP_STATE, false);
    if(SendCommand(command))
       Expect(command);
@@ -224,6 +231,34 @@ void Expect(const string command)
    if(InpShowDashboard && g_scalp_count > 0)
       Dashboard(g_scalp[0]);
    DrawAnalysis();
+  }
+
+//+------------------------------------------------------------------+
+//| The selected scalper modes, "off" or a list such as "hft,swing"   |
+//+------------------------------------------------------------------+
+bool HasMode(const string modes, const string mode)
+  {
+   string parts[];
+   int count = StringSplit(modes, ',', parts);
+   for(int i = 0; i < count; i++)
+      if(parts[i] == mode)
+         return(true);
+   return(false);
+  }
+
+string ToggleMode(const string modes, const string mode)
+  {
+   string names[3] = {"hft", "intraday", "swing"};
+   string result = "";
+   for(int i = 0; i < 3; i++)
+     {
+      bool on = HasMode(modes, names[i]);
+      if(names[i] == mode)
+         on = !on;
+      if(on)
+         result += (result == "" ? "" : ",") + names[i];
+     }
+   return(result == "" ? "off" : result);
   }
 
 //+------------------------------------------------------------------+
@@ -647,7 +682,7 @@ bool LayerShown(const string mode)
       return(false);
    if(InpModeLayers == GS_LAYERS_ALL)
       return(true);
-   return(mode == g_mode || (mode == "" && g_mode == "hft"));
+   return(HasMode(g_mode, mode) || (mode == "" && HasMode(g_mode, "hft")));
   }
 
 void DrawScalper()
@@ -772,6 +807,8 @@ void DrawScalp(const string line)
    double tp1     = JsonNumber(line, "tp1");
    double tp2     = JsonNumber(line, "tp2");
    double tp3     = JsonNumber(line, "tp3");
+   double tp4     = JsonNumber(line, "tp4");
+   double tp5     = JsonNumber(line, "tp5");
    double r       = JsonNumber(line, "r");
    if(id == "" || start <= 0 || entry <= 0 || sl <= 0 || tp1 <= 0)
       return;
@@ -779,7 +816,7 @@ void DrawScalp(const string line)
    bool open = (status == "open");
    int bar = PeriodSeconds(_Period);
    datetime finish = (open || end <= start) ? start + (datetime)(bar * InpScalpBoxBars) : end;
-   double farthest = tp3 > 0 ? tp3 : (tp2 > 0 ? tp2 : tp1);
+   double farthest = tp5 > 0 ? tp5 : (tp4 > 0 ? tp4 : (tp3 > 0 ? tp3 : (tp2 > 0 ? tp2 : tp1)));
    string base = SPREFIX + id + "_";
 
    Box(base + "risk", start, entry, finish, sl, InpRiskFill);
@@ -791,6 +828,10 @@ void DrawScalp(const string line)
       Level(base + "tp2", start, finish, tp2, InpTargetColor, STYLE_DASH, 1, "TP2  " + Price(tp2));
    if(tp3 > 0)
       Level(base + "tp3", start, finish, tp3, InpTargetColor, STYLE_DASH, 1, "TP3  " + Price(tp3));
+   if(tp4 > 0)
+      Level(base + "tp4", start, finish, tp4, InpTargetColor, STYLE_DASH, 1, "TP4  " + Price(tp4));
+   if(tp5 > 0)
+      Level(base + "tp5", start, finish, tp5, InpTargetColor, STYLE_DASH, 1, "TP5  " + Price(tp5));
    if(open && stop > 0 && MathAbs(stop - sl) > _Point)
       Level(base + "stop", start, finish, stop, InpStopColor, STYLE_DOT, 1, "stop  " + Price(stop));
    string arrow = buy ? ShortToString(0x25B2) : ShortToString(0x25BC);
@@ -808,7 +849,7 @@ void Dashboard(const string head)
    int x = 10;
    int y = InpDashboardY;
    int width = 620;
-   int height = 176;
+   int height = DASH_HEIGHT;
    Panel(SPREFIX + "dash_back", CORNER_LEFT_LOWER, x, y + height, width, height);
    Panel(SPREFIX + "dash_header", CORNER_LEFT_LOWER, x, y + height, width, 24);
    ObjectSetInteger(0, SPREFIX + "dash_header", OBJPROP_BGCOLOR, C'40,34,14');
@@ -832,9 +873,9 @@ void Dashboard(const string head)
       Button(SPREFIX + "cmd_mode_both", CORNER_LEFT_LOWER, bx + 162, by, 52, 17, "Both", g_strategies == "both");
       Label(SPREFIX + "dash_mode", CORNER_LEFT_LOWER, bx + 236, by - 2, "Scalper:", clrSilver, 8);
       Button(SPREFIX + "cmd_scalper_off", CORNER_LEFT_LOWER, bx + 290, by, 44, 17, "Off", g_mode == "off");
-      Button(SPREFIX + "cmd_scalper_hft", CORNER_LEFT_LOWER, bx + 338, by, 44, 17, "HFT", g_mode == "hft");
-      Button(SPREFIX + "cmd_scalper_intraday", CORNER_LEFT_LOWER, bx + 386, by, 64, 17, "Intraday", g_mode == "intraday");
-      Button(SPREFIX + "cmd_scalper_swing", CORNER_LEFT_LOWER, bx + 454, by, 52, 17, "Swing", g_mode == "swing");
+      Button(SPREFIX + "cmd_scalper_hft", CORNER_LEFT_LOWER, bx + 338, by, 44, 17, "HFT", HasMode(g_mode, "hft"));
+      Button(SPREFIX + "cmd_scalper_intraday", CORNER_LEFT_LOWER, bx + 386, by, 64, 17, "Intraday", HasMode(g_mode, "intraday"));
+      Button(SPREFIX + "cmd_scalper_swing", CORNER_LEFT_LOWER, bx + 454, by, 52, 17, "Swing", HasMode(g_mode, "swing"));
       if(g_pending_gmt > 0)
          Label(SPREFIX + "dash_sent", CORNER_LEFT_LOWER, bx + 512, by - 2, "sent: " + g_pending_text,
                clrSilver, 7);
@@ -868,14 +909,27 @@ void Dashboard(const string head)
       Label(SPREFIX + "t1", CORNER_LEFT_LOWER, x + 215, row, JsonString(head, "active_dir") + " " + active, clrWhite, 8);
       Label(SPREFIX + "t2", CORNER_LEFT_LOWER, x + 215, row - 16, "Entry " + Price(JsonNumber(head, "active_entry")) +
             "  stop " + Price(JsonNumber(head, "active_stop")), clrSilver, 8);
-      Label(SPREFIX + "t3", CORNER_LEFT_LOWER, x + 215, row - 32, "TP1 " + Price(JsonNumber(head, "active_tp1")) +
-            (hit >= 1 ? " ok" : "") + "  TP2 " + Price(JsonNumber(head, "active_tp2")) + (hit >= 2 ? " ok" : ""),
-            InpTargetColor, 8);
-      Label(SPREFIX + "t4", CORNER_LEFT_LOWER, x + 215, row - 48, "TP3 " + Price(JsonNumber(head, "active_tp3")) +
-            (hit >= 3 ? " ok" : ""), InpTargetColor, 8);
-      Label(SPREFIX + "t5", CORNER_LEFT_LOWER, x + 215, row - 64, StringFormat("%+.2f R | parts %s | %d min",
-            JsonNumber(head, "active_r"), JsonString(head, "active_children"),
-            (int)JsonNumber(head, "active_min")), clrSilver, 8);
+      // Targets two to a row (up to five: HFT's quick ladder, S9), then the R line.
+      int line = 2;
+      for(int k = 1; k <= 5; k += 2)
+        {
+         double first = JsonNumber(head, "active_tp" + IntegerToString(k));
+         if(first <= 0)
+            break;
+         string text = Target(k, first, hit);
+         double second = (k < 5) ? JsonNumber(head, "active_tp" + IntegerToString(k + 1)) : 0.0;
+         if(second > 0)
+            text += "  " + Target(k + 1, second, hit);
+         line++;
+         Label(SPREFIX + "t" + IntegerToString(line), CORNER_LEFT_LOWER, x + 215, row - 16 * (line - 1), text,
+               InpTargetColor, 8);
+        }
+      line++;
+      Label(SPREFIX + "t" + IntegerToString(line), CORNER_LEFT_LOWER, x + 215, row - 16 * (line - 1),
+            StringFormat("%+.2f R | parts %s | %d min", JsonNumber(head, "active_r"),
+                         JsonString(head, "active_children"), (int)JsonNumber(head, "active_min")), clrSilver, 8);
+      for(int extra = line + 1; extra <= 6; extra++)
+         ObjectDelete(0, SPREFIX + "t" + IntegerToString(extra));
      }
 
    Label(SPREFIX + "p1", CORNER_LEFT_LOWER, x + 420, row, "Today: " + Results(head, "today"), clrSilver, 8);
@@ -886,6 +940,11 @@ void Dashboard(const string head)
          100 * JsonNumber(head, "d30_win"), 100 * JsonNumber(head, "d30_be"), JsonNumber(head, "d30_pf")), clrSilver, 8);
    Label(SPREFIX + "p5", CORNER_LEFT_LOWER, x + 420, row - 64, "Updated " + JsonString(head, "updated_utc"), clrGray, 8);
    ShowStale();
+  }
+
+string Target(const int number, const double price, const int hit)
+  {
+   return("TP" + IntegerToString(number) + " " + Price(price) + (hit >= number ? " ok" : ""));
   }
 
 string Results(const string head, const string prefix)
@@ -916,7 +975,7 @@ void ShowStale()
       ObjectDelete(0, name);
       return;
      }
-   Label(name, CORNER_LEFT_LOWER, 300, InpDashboardY + 176 - 4,
+   Label(name, CORNER_LEFT_LOWER, 300, InpDashboardY + DASH_HEIGHT - 4,
          StringFormat("STALE: no update for %d min (is the bot running?)", (int)(age / 60)),
          InpSellColor, 9);
    ChartRedraw(0);

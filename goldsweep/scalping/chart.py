@@ -3,10 +3,11 @@
 The bot rewrites ``scalp.json`` next to ``signals.json`` (MetaTrader 5's shared
 ``Common\\Files\\GoldSweep`` folder) after every scalper minute. ``GoldSweepPanel.mq5``
 v2 draws from it: the HFT step line and its sweep "X" markers, every recent scalp's
-box (risk and reward zones, SL / ENTRY / TP1-TP3 labels, TP-hit markers, the result
-once closed) and the scalper's dashboard box (mode, status, market, the active scalp,
-today's and 30 days' results). The format is the one ``signals.json`` uses: a head
-object on the first line, then one item per line, so MQL5 reads it line by line. Times
+box (risk and reward zones, SL / ENTRY / TP1-TP5 labels, TP-hit markers, the result
+once closed) and the scalper's dashboard box (the selected modes, e.g. ``hft,swing``,
+status, market, the active scalp, today's and 30 days' results). The format is the one
+``signals.json`` uses: a head object on the first line, then one item per line, so MQL5
+reads it line by line. Times
 are the chart's clock (broker server time); ``updated_gmt`` is true UTC, so the panel
 can tell when the file has gone stale.
 
@@ -32,6 +33,7 @@ from goldsweep.core.clock import ensure_utc
 from goldsweep.core.logging import get_logger
 from goldsweep.execution.panel import ascii_text
 from goldsweep.scalping.logic import ChartMarks
+from goldsweep.scalping.modes import all_selections
 from goldsweep.scalping.stats import ClosedScalp, Stats
 
 if TYPE_CHECKING:
@@ -43,20 +45,19 @@ SCALP_FILE = "scalp.json"
 COMMANDS_FILE = "scalp_commands.json"
 #: What the panel's buttons may ask for (D99, D113, D114): the switches Telegram has;
 #: never an order, the kill switch or an approval.
+#: The scalper's selections are ``scalper:off`` and every combination of modes in their
+#: fixed order (``scalper:hft``, ``scalper:hft,swing`` ...; S9, D115).
 PANEL_COMMANDS = (
     "pause",
     "resume",
     "mode:main",
     "mode:scalper",
     "mode:both",
-    "scalper:off",
-    "scalper:hft",
-    "scalper:intraday",
-    "scalper:swing",
+    *(f"scalper:{key}" for key in all_selections()),
 )
 #: Closed scalps drawn on the chart (their boxes and TP-hit markers).
 SHOWN_CLOSED = 12
-_TP_REASONS = {"tp1": "TP1", "tp2": "TP2", "tp3": "TP3"}
+_TP_REASONS = {f"tp{n}": f"TP{n}" for n in range(1, 6)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +256,8 @@ class ScalpPanel:
             "tp1": self._price(scalp.take_profit_1),
             "tp2": self._price(scalp.take_profit_2),
             "tp3": self._price(scalp.take_profit_3),
+            "tp4": self._price(scalp.target(4)),
+            "tp5": self._price(scalp.target(5)),
             "status": "closed",
             "r": round(scalp.r_multiple, 2),
             "exit": scalp.exit_reason,
@@ -273,7 +276,7 @@ class ScalpPanel:
         self, position: dict[str, Any], now: dt.datetime, price: float | None
     ) -> dict[str, Any]:
         targets = list(position.get("take_profits") or position.get("targets") or [])
-        targets += [0.0] * (3 - len(targets))
+        targets += [0.0] * (5 - len(targets))
         return {
             "k": "scalp",
             "id": position["id"],
@@ -288,6 +291,8 @@ class ScalpPanel:
             "tp1": self._price(targets[0]),
             "tp2": self._price(targets[1]),
             "tp3": self._price(targets[2]),
+            "tp4": self._price(targets[3]),
+            "tp5": self._price(targets[4]),
             "status": "open",
             "r": self._risk_r(position, price),
             "exit": "",
@@ -300,8 +305,9 @@ class ScalpPanel:
         now: dt.datetime,
         price: float | None,
     ) -> dict[str, Any]:
-        """The dashboard's trade column: the selected mode's open scalp, else any."""
-        chosen = next((p for p in open_scalps if p.get("mode") == mode), None)
+        """The dashboard's trade column: a selected mode's open scalp, else any."""
+        selected = mode.split(",")
+        chosen = next((p for p in open_scalps if p.get("mode") in selected), None)
         chosen = chosen or (open_scalps[0] if open_scalps else None)
         if chosen is None:
             return {"active": ""}
@@ -314,7 +320,7 @@ class ScalpPanel:
             if opened
             else 0
         )
-        targets = planned + [0.0] * (3 - len(planned))
+        targets = planned + [0.0] * (5 - len(planned))
         return {
             "active": chosen["id"],
             "active_mode": chosen.get("mode", "?"),
@@ -324,6 +330,8 @@ class ScalpPanel:
             "active_tp1": self._price(targets[0]),
             "active_tp2": self._price(targets[1]),
             "active_tp3": self._price(targets[2]),
+            "active_tp4": self._price(targets[3]),
+            "active_tp5": self._price(targets[4]),
             "active_hit": hit,
             "active_children": f"{len(live)}/{len(planned) or len(live)}",
             "active_r": self._risk_r(chosen, price),

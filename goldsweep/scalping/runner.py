@@ -1,4 +1,4 @@
-"""The scalper running live (S5-S6, D111-D112): its three modes on the M1 feed.
+"""The scalper running live (S5-S6, S9; D111, D112, D115): its modes on the M1 feed.
 
 Called once a minute by the bot (under its lock). Each call:
 
@@ -9,12 +9,21 @@ Called once a minute by the bot (under its lock). Each call:
    mode's executors, which manage its open scalps with the shared rules. Every mode
    is fed, selected or not, so a switch takes effect at once and a mode's open scalps
    are managed to the end by their own rules;
-3. for a candidate of the **selected** mode on the newest bar, runs the gates: the
-   mode may open trades; the setup is fresh; that mode has no scalp open; its own
-   filters (sessions, activity, H1 trend, flat-by time); the cooldown after a
-   stop-out; a stop and ladder that pass the cost gate; the account guard (when the
-   scalp shares the demo account with the main strategy); then the executor's own
-   risk checks (limits, spread, news blackout). The order goes in at market.
+3. for a candidate of a **selected** mode on the newest bar (one, two or all three
+   modes may be selected, S9), runs the gates: the mode may open trades; the setup
+   is fresh; that mode has no scalp open; its own filters (sessions, activity, H1
+   trend, flat-by time); for HFT, a live A or A+ setup of the main strategy in its
+   direction (:mod:`~goldsweep.scalping.grade_filter`); the cooldown after a
+   stop-out; the rules the modes share in one account (below); a stop and ladder that
+   pass the cost gate; the account guard (when the scalp shares the demo account with
+   the main strategy); then the executor's own risk checks (limits, spread, news
+   blackout). The order goes in at market.
+
+**Shared rules** (S9, D115), per account (all paper books together, or the demo
+account): no scalp against another mode's open scalp (no hedging); a second scalp the
+same way only when every scalp open that way is risk-free, its stop at or past its
+entry (no stacking); and one set of daily limits for all modes: the scalper's daily
+loss in R, its scalps a day, and the pause after losses in a row.
 
 Each mode has a **paper** book (its own notional balance) and, on a live bot, a
 **demo** executor on the same MT5 account with the mode's own magic number; an
@@ -25,12 +34,14 @@ quiet (D97): one when a scalp is placed, one when it closes.
 from __future__ import annotations
 
 import datetime as dt
+from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 import pandas as pd
 
 from goldsweep.alerts import messages
+from goldsweep.analysis.periods import trading_day_of
 from goldsweep.analysis.structure import Direction
 from goldsweep.backtest.engine import spread_points
 from goldsweep.core.clock import Clock, SessionCalculator, ensure_utc
@@ -48,7 +59,8 @@ from goldsweep.execution.executor import (
     trades_between,
 )
 from goldsweep.risk.account_guard import AccountGuard, Exposure
-from goldsweep.risk.risk_manager import NewsEvent
+from goldsweep.risk.risk_manager import PAUSE_AFTER_LOSSES, NewsEvent
+from goldsweep.scalping.grade_filter import GRADE_NAMES, GradedSetup, PathBar, hft_permission
 from goldsweep.scalping.logic import HFT, INTRADAY, SWING, Candidate, ModeLogic, make_logic
 from goldsweep.scalping.modes import REGISTRY
 from goldsweep.scalping.plan import LadderCosts, scalp_risk
@@ -80,25 +92,51 @@ MEDIAN_SPREAD_DAYS = 20
 MINUTE = dt.timedelta(minutes=1)
 #: A setup older than this when the job sees it (the bot was busy) is not traded.
 STALE_AFTER = dt.timedelta(seconds=90)
+#: M1 bars of price path kept for the A/A+ filter (a day).
+PATH_BARS = 1440
+#: Closed scalps read for the shared limits (the losses-in-a-row pause looks this far).
+SHARED_LOOKBACK = dt.timedelta(days=7)
+_EPSILON = 1e-9
 
 
 @dataclass(frozen=True, slots=True)
 class ScalpContext:
-    """What the bot tells the runner each minute."""
+    """What the bot tells the runner each minute.
 
-    mode: str  # the selected mode: off / hft / intraday / swing
-    may_open: bool  # /mode allows the scalper, trading is active, the mode is built
-    demo: bool  # orders go to the demo account (the mode was approved there)
+    ``modes`` and ``demo_modes`` (S9) say which modes are selected and which of them
+    trade on the demo account; without them, ``mode`` and ``demo`` (S5-S8: one mode)
+    do.
+    """
+
+    mode: str = "off"  # one selected mode: off / hft / intraday / swing
+    may_open: bool = False  # /mode allows the scalper, trading is active
+    demo: bool = False  # ``mode``'s orders go to the demo account (approved there)
     events: Sequence[NewsEvent] = ()  # releases, for the blackout
-    #: The main strategy's open trades and waiting orders in the scalp's account
-    #: (``None``: the scalp does not share an account with it, e.g. paper beside live).
+    #: The main strategy's open trades and waiting orders in the demo account
+    #: (``None``: no scalp shares an account with it, e.g. paper beside live).
     main_exposures: Sequence[Exposure] | None = None
     equity: float = 0.0  # that account's equity, for the guard
+    modes: frozenset[str] | None = None  # the selected (built) modes
+    demo_modes: frozenset[str] | None = None  # those approved for the demo account
+    #: The main strategy's A/A+ setups HFT may follow (``None``: the filter is off).
+    hft_setups: Sequence[GradedSetup] | None = None
+
+    @property
+    def selected(self) -> frozenset[str]:
+        if self.modes is not None:
+            return self.modes
+        return frozenset() if self.mode == "off" else frozenset({self.mode})
+
+    def on_demo(self, mode: str) -> bool:
+        """Do ``mode``'s new scalps go to the demo account?"""
+        if self.demo_modes is not None:
+            return mode in self.demo_modes
+        return self.demo and mode == self.mode
 
 
 @dataclass(frozen=True, slots=True)
 class Decision:
-    """What the selected mode did on its latest bar (the chart's Quick Scalp line)."""
+    """What a selected mode did on its latest bar (the chart's Quick Scalp line)."""
 
     time: dt.datetime  # the signal bar's close (UTC)
     signal: str  # BUY / SELL / NONE
@@ -129,6 +167,15 @@ class ModeSlot:
 
     def where(self, executor: Executor) -> str:
         return "demo" if executor is self.demo else "paper"
+
+
+def risk_free(position: Mapping[str, object], direction: Direction) -> bool:
+    """Is an open scalp's stop at or past its entry (it can no longer lose)?"""
+    stop = float(position["stop"])  # type: ignore[arg-type]
+    fill = float(position["fill_price"])  # type: ignore[arg-type]
+    if direction is Direction.LONG:
+        return stop >= fill - _EPSILON
+    return stop <= fill + _EPSILON
 
 
 def breakeven_offset(settings: Settings, spec: SymbolSpec) -> float:
@@ -204,6 +251,8 @@ class ScalperRunner:
         self._last: dt.datetime | None = None
         #: The last M1 close seen (for the chart's current R).
         self.last_close: float | None = None
+        #: Recent M1 highs and lows: has an A/A+ setup reached its target or failed?
+        self.path: deque[PathBar] = deque(maxlen=PATH_BARS)
 
     @classmethod
     def build(
@@ -307,13 +356,14 @@ class ScalperRunner:
             o, h, low, c = (float(column[i]) for column in columns)
             stamp = to_ns(start)
             bar = Bar(stamp, stamp + 60 * 10**9, o, h, low, c, float(spreads[i]))
+            self.path.append(PathBar(start, h, low))
             for slot in self.slots.values():
                 candidates = slot.logic.on_bar(start, o, h, low, c, float(volumes[i]))
                 if not warmup or i == newest:  # a (re)start replays no history into the books
                     for executor in slot.executors:
                         events = executor.on_bar(bar, line=slot.logic.line)
                         texts += self._report(slot, executor, events)
-                if warmup or i != newest or slot.name != context.mode:
+                if warmup or i != newest or slot.name not in context.selected:
                     continue
                 if not candidates:
                     slot.decision = Decision(start + MINUTE, "NONE", "no setup on the last bar")
@@ -352,17 +402,35 @@ class ScalperRunner:
         if now - candidate.time > STALE_AFTER:  # the job ran late: the moment has passed
             log.info("scalp skipped: the setup is stale", age=str(now - candidate.time))
             return skip("the setup is stale")
-        executor = slot.target(context.demo)
+        demo = context.on_demo(slot.name)
+        executor = slot.target(demo)
         if self.busy(executor):
             return skip("a scalp of this mode is already open")
         gate = slot.logic.gate(candidate)
         if not gate.passed:
             log.info("scalp skipped", mode=slot.name, reason=gate.reason)
             return skip(gate.reason or "the mode's filters")
+        if slot.name == HFT and context.hft_setups is not None:
+            hft = self._config.scalper.hft
+            refusal = hft_permission(
+                candidate.direction,
+                context.hft_setups,
+                self.path,
+                now,
+                dt.timedelta(minutes=hft.a_window_min),
+                GRADE_NAMES.get(hft.grade_filter, "A or A+"),
+            )
+            if refusal is not None:
+                log.info("scalp skipped", mode=slot.name, reason=refusal)
+                return skip(refusal)
         stopped = slot.stopped_out.get(candidate.direction)
         cooldown = dt.timedelta(seconds=self._config.scalper.risk.cooldown_sec)
         if stopped is not None and candidate.time - stopped < cooldown:
             return skip("cooldown after a stop-out")
+        shared = self.shared_refusal(slot, candidate.direction, demo=demo, now=now)
+        if shared is not None:
+            log.info("scalp skipped", mode=slot.name, reason=shared)
+            return skip(shared)
         try:
             spread = float(self._broker.spread_points(self.spec.name))
         except BrokerError as exc:
@@ -379,7 +447,7 @@ class ScalperRunner:
             log.info("scalp skipped", mode=slot.name, reason=made.reason)
             return skip(made.reason)
         plan = made.plan
-        if self._guard is not None and context.main_exposures is not None:
+        if self._guard is not None and context.main_exposures is not None and demo:
             risk = context.equity * self._config.scalper.risk.risk_per_scalp_pct / 100.0
             mine = [x for e in self.demo_executors for x in self.exposures(e)]
             decision = self._guard.check(
@@ -405,6 +473,69 @@ class ScalperRunner:
             candidate.time, side, f"placed {plan.id} ({where})", candidate.rule
         )
         return messages.scalp_placed(plan, event, slot.name, where, candidate.reason)
+
+    def shared_refusal(
+        self, slot: ModeSlot, direction: Direction, *, demo: bool, now: dt.datetime
+    ) -> str | None:
+        """The rules all modes share in one account (S9, D115), or None when they pass.
+
+        The account is the demo account (every mode's demo executor) or paper (every
+        mode's paper book). No hedging, no stacking unless risk-free, and one set of
+        daily limits for every mode together.
+        """
+        for other in self.slots.values():
+            if other is slot:
+                continue
+            executor = other.demo if demo else other.paper
+            if executor is None:
+                continue
+            name = other.name
+            for position in executor.open_positions:
+                way = Direction(position["direction"])
+                if way is not direction:
+                    return f"the {name} scalp is open the other way (no hedging)"
+                if not risk_free(position, way):
+                    return f"the {name} scalp this way is not risk-free yet (no stacking)"
+            for plan in executor.pending_orders:
+                if plan.direction is not direction:
+                    return f"the {name} scalp is waiting the other way (no hedging)"
+                return f"the {name} scalp this way is still waiting (no stacking)"
+        return self._shared_limits(demo, now)
+
+    def _shared_limits(self, demo: bool, now: dt.datetime) -> str | None:
+        """The scalper's daily limits counted over every mode in the account."""
+        limits = self._config.scalper.risk
+        table = SCALP_LIVE_TABLE if demo else SCALP_PAPER_TABLE
+        rows = sorted(
+            trades_between(self._db, table, now - SHARED_LOOKBACK, now + MINUTE),
+            key=lambda row: row.exit_time,
+        )
+        paused_until: dt.datetime | None = None
+        in_a_row = 0
+        for row in rows:  # as the risk manager counts, over every mode together
+            if row.net_pnl < 0:
+                in_a_row += 1
+                if in_a_row >= limits.max_consecutive_losses:
+                    paused_until, in_a_row = row.exit_time + PAUSE_AFTER_LOSSES, 0
+            else:
+                in_a_row = 0
+        if paused_until is not None and now < paused_until:
+            return (
+                f"{limits.max_consecutive_losses} losses in a row across the modes: "
+                f"paused until {paused_until:%Y-%m-%d %H:%M} UTC"
+            )
+        boundary = self._config.strategy.liquidity.day_boundary
+        today = trading_day_of(now, boundary)
+        day = [row for row in rows if trading_day_of(row.exit_time, boundary) == today]
+        limit_r = limits.daily_loss_limit_pct / limits.risk_per_scalp_pct
+        total_r = sum(row.r_multiple for row in day)
+        if total_r <= -limit_r + _EPSILON:
+            return f"the daily loss limit across the modes ({total_r:+.2f} R of -{limit_r:g} R)"
+        executors = [s.demo if demo else s.paper for s in self.slots.values()]
+        opened = sum(len(e.open_positions) for e in executors if e is not None)
+        if len(day) + opened >= limits.max_scalps_per_day:
+            return f"{limits.max_scalps_per_day} scalps today across the modes (the daily maximum)"
+        return None
 
     def _next_id(self, slot: ModeSlot, now: dt.datetime) -> str:
         """The next id, ``<date>-<prefix>-<n>`` (counted once the scalp is placed)."""

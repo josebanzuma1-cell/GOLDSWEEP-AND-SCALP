@@ -31,7 +31,7 @@ review after each one.
 | 8 | Unattended running (Task Scheduler, /golive), heartbeat, watchdog, backups, VPS guide | built, tested, approved |
 | 9 | More trades and "sniper" entries: (1) entries that fill and never wait into a blocked time, (2) M1 refinement, (3) more setup models | built and tested: entries wait 2 hours (D82), M1 refinement left off (D83), breakeven only at TP1 (D84), new models alert only (D85) |
 | 10 | Session playbooks: A+ grades, per-session strategy from the evidence, monitoring before auto-trading | built, tested, approved: candidates from the analysis (D86), shadow-book monitoring, `/approve`, Asia on (D87) |
-| S | Scalper add-on alongside the main strategy (`docs/SCALPER_SPEC.md`): M1 scalps, step trail, three-child ladder, chart dashboard, MT5 assistant | S0 approved (Python engine, D89); S1 (logic, tests, first backtest) built: it loses after costs in every variant (D101), so it stays off. Research on tick ("HFT"), intraday and swing modes with a switch between them: `docs/SCALPER_MODES.md` (D102-D107), approved. S2 (the switch, the tick recorder, latency, costs; D108) approved. S3 (intraday mode) built and tested: all three rules lose after costs, so the mode does not run (D109), approved. S4 (swing mode: Donchian, momentum, pullback, swap charged) built and tested: negative over 2014-2022, positive only in the 2022-2026 rise, and a 0.01 lot needs about 76,000 at 0.25%; the mode does not run (D110), approved. Scalper v3 (D111): HFT on M1, intraday on M5, swing scalping on M15, each tested on paper then on the demo account (backtests reported, not gates); tick recorder off. S5 (HFT mode: runner, scalper paper book and demo executor with its own magic number, account guard, no opposite positions) built and tested; its backtest loses 0.12 R a scalp after costs (D111); approved, on paper then the demo account. S6 (intraday on M5, swing scalping on M15, one mode interface for the bot and the new mode backtest, a book and magic number per mode) built and tested: intraday -0.04 R a trade after costs (flat before), swing scalping -0.07 R (D112); approved. S7 (chart panel v2 from `scalp.json` with Pause / Resume / Scalper off buttons, the dashboard's Scalper tab, Telegram `/stats`; D113) built, tested and approved. S8 (chart panel v3: graded signals in the reference layout, setups forming with "A+ possible", pools and gaps, each scalper mode's layer, analysis box, switch buttons, chart theme, A+ alerts, `deploy\install-panel.ps1`; D114) built, tested and approved |
+| S | Scalper add-on alongside the main strategy (`docs/SCALPER_SPEC.md`): M1 scalps, step trail, three-child ladder, chart dashboard, MT5 assistant | S0 approved (Python engine, D89); S1 (logic, tests, first backtest) built: it loses after costs in every variant (D101), so it stays off. Research on tick ("HFT"), intraday and swing modes with a switch between them: `docs/SCALPER_MODES.md` (D102-D107), approved. S2 (the switch, the tick recorder, latency, costs; D108) approved. S3 (intraday mode) built and tested: all three rules lose after costs, so the mode does not run (D109), approved. S4 (swing mode: Donchian, momentum, pullback, swap charged) built and tested: negative over 2014-2022, positive only in the 2022-2026 rise, and a 0.01 lot needs about 76,000 at 0.25%; the mode does not run (D110), approved. Scalper v3 (D111): HFT on M1, intraday on M5, swing scalping on M15, each tested on paper then on the demo account (backtests reported, not gates); tick recorder off. S5 (HFT mode: runner, scalper paper book and demo executor with its own magic number, account guard, no opposite positions) built and tested; its backtest loses 0.12 R a scalp after costs (D111); approved, on paper then the demo account. S6 (intraday on M5, swing scalping on M15, one mode interface for the bot and the new mode backtest, a book and magic number per mode) built and tested: intraday -0.04 R a trade after costs (flat before), swing scalping -0.07 R (D112); approved. S7 (chart panel v2 from `scalp.json` with Pause / Resume / Scalper off buttons, the dashboard's Scalper tab, Telegram `/stats`; D113) built, tested and approved. S8 (chart panel v3: graded signals in the reference layout, setups forming with "A+ possible", pools and gaps, each scalper mode's layer, analysis box, switch buttons, chart theme, A+ alerts, `deploy\install-panel.ps1`; D114) built, tested and approved. S9 (one, two or all three modes side by side with shared rules per account; HFT as one trade in five parts at 0.25 R steps, 0.25% risk for all five, only in the direction of a live A or A+ setup and no longer once that setup is done; chart panel v3.1 toggles and TP4/TP5; D115) built and tested: the five-part ladder still loses 0.12 R a scalp after costs in the backtest, which cannot apply the A filter; awaiting approval |
 
 Only `python main.py --live` sends orders to a broker, and only after
 `MODE=LIVE` in `.env`, `mode: LIVE` in `config.yaml` and the account number typed
@@ -103,13 +103,23 @@ and Asian/London range breakouts with the H1 trend, a 20-bar channel trail, held
 to two days and never over the weekend (S6). Each mode keeps its own paper book and
 demo executor (its own magic number), and a mode switched away from still manages its
 open scalp to the end. `/mode main|scalper|both` chooses which strategies may open trades and
-`/scalper off|hft|intraday|swing` chooses the scalper's mode (also on the dashboard's
-Control tab). A selected mode runs on the scalper's own **paper** book (a notional
+`/scalper off|hft|intraday|swing` chooses the scalper's mode; one, two or all three run
+side by side with `/scalper hft,swing` or `/scalper all` (S9; also on the dashboard's
+Control tab and the chart panel's toggles). Side by side, the modes share one set of
+rules per account: no scalp against another mode's open scalp, a second scalp the same
+way only once the first is risk-free, and one daily loss limit (-4 R), 8 scalps a day
+and the 3-losses pause for all modes together. A selected mode runs on the scalper's own **paper** book (a notional
 10,000) on the live feed; `/approve scalper <mode>` sends its scalps to the **demo
 account** with the scalper's own magic number, and `/revoke scalper <mode>` returns it
-to paper. Every scalp carries a stop-loss and three take-profits (0.5/1/1.5 R), one
-scalp at a time; breakeven-plus at TP1, the stop to TP1 after TP2, the step trail and
-a 15-minute time stop manage it. The scalper never holds the side opposite the main
+to paper. Every scalp carries a stop-loss and its take-profits, one scalp at a time per
+mode. **HFT** (S9) is one trade in five parts with 0.25% risk for all five together,
+targets at 0.25/0.5/0.75/1.0/1.25 R (wider when the costs need it), and it trades only
+the direction of a live A or A+ setup of the main strategy: one graded in the last 60
+minutes that has not reached its target, failed back through its sweep or closed its
+trade, or one forming now that can still be A+. Once that setup is done, HFT stops
+taking new scalps that way; an open scalp finishes under its own stop, targets and
+15-minute time stop. Breakeven-plus at TP1, then the stop to TP k-1 after each TP k,
+and the step trail manage it. The scalper never holds the side opposite the main
 strategy: a main order first closes an opposite scalp. Messages are two per scalp
 (placed, closed); `/status` lists open scalps and the last 24 hours. Backtests are
 reported, not gates (D111): on 2024-2026 HFT lost 0.12 R a scalp after costs, intraday
@@ -263,7 +273,7 @@ The bot answers only that chat:
 | `/approve <session>` | after its monitoring is confirmed, the session (`asia`, `london`, `newyork`) trades only its A+ playbook (D87) |
 | `/revoke <session>` | back to the session's trading rule; its A+ candidate is monitored again |
 | `/mode main\|scalper\|both` | which strategies may open trades (D103); `/mode` alone shows it |
-| `/scalper off\|hft\|intraday\|swing` | the scalper's mode; a selected mode runs on the scalper's paper book, and an unbuilt mode does nothing |
+| `/scalper off\|hft\|intraday\|swing` | the scalper's modes: one, or several as `/scalper hft,swing`, or `/scalper all`; a selected mode runs on the scalper's paper book, and an unbuilt mode does nothing |
 | `/approve scalper <mode>` | sends that mode's scalps to the demo account (a real account also needs the forward-test file, D93) |
 | `/revoke scalper <mode>` | back to paper; scalps already open keep their stop-loss and take-profit |
 | `/stats [days]` | results after costs per scalper mode (paper and demo, next to each backtest) and of the main strategy; 30 days unless given |
@@ -348,7 +358,7 @@ by hand are never touched (except by `/stop`, which only closes GoldSweep's).
 
 While the bot runs (paper or live) it writes two files to MetaTrader 5's shared
 `Common\Files\GoldSweep` folder: `signals.json` after every M5 bar and `scalp.json`
-every minute. The indicator `mt5/GoldSweepPanel.mq5` (version 3, S8, D114) draws
+every minute. The indicator `mt5/GoldSweepPanel.mq5` (version 3.1, S8-S9, D114-D115) draws
 them on the gold chart in the GoldSweep look:
 
 - **Signals**: a tag such as `SELL A+ 82` (gold for A+), the trade box with its risk
@@ -361,8 +371,8 @@ them on the gold chart in the GoldSweep look:
   watch, not an order; many raids never become signals.
 - **Levels**: the nearest liquidity pools above and below price, and open fair value
   gaps.
-- **Scalper**: the HFT step line and its "x" marks, each scalp's box with TP hits and
-  result, and the selected mode's own layer (intraday: VWAP, Asian and New York
+- **Scalper**: the HFT step line and its "x" marks, each scalp's box with its targets
+  (TP1-TP5 for HFT), TP hits and result, and each selected mode's own layer (intraday: VWAP, Asian and New York
   opening ranges; swing: the M15 20 EMA, its 20-bar channel, Asian and London
   ranges).
 - **Dashboard** (bottom-left): mode and PAPER/DEMO badge, buttons, the status and
@@ -380,7 +390,8 @@ them on the gold chart in the GoldSweep look:
 - **Alerts**: a pop-up and sound (and, if you switch it on, a push to the MT5 phone
   app) for each new A+ signal and each new setup that can still be A+.
 - **Buttons**: Pause/Resume; Trade: Main / Scalper / Both; Scalper: Off / HFT /
-  Intraday / Swing. They write one line to `scalp_commands.json`, which the bot
+  Intraday / Swing, where HFT, Intraday and Swing each switch one mode on or off, so
+  one, two or all three can run (Off clears them). They write one line to `scalp_commands.json`, which the bot
   carries out within a few seconds and reports on Telegram. That file is the only
   thing the indicator writes. It never trades, and the kill switch and `/approve`
   stay on Telegram and the dashboard.

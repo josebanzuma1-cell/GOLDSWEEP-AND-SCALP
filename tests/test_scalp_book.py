@@ -174,9 +174,9 @@ def test_a_short_scalp_tp1_breakeven_plus_tp2_stop_to_tp1(settings: Settings) ->
     trade = closed.trade
     assert trade is not None
     assert [(leg.lots, leg.reason) for leg in trade.legs] == [
-        (0.03, ExitReason.TP1),
-        (0.02, ExitReason.TP2),
-        (0.03, ExitReason.TRAIL),
+        (0.03, ExitReason.TP1),  # 0.08 lots in whole steps, largest remainders first
+        (0.03, ExitReason.TP2),
+        (0.02, ExitReason.TRAIL),
     ]
     assert trade.net_pnl > 0  # the last child kept TP1's gain
 
