@@ -45,7 +45,15 @@ from goldsweep.scalping.recovery import (
 )
 from goldsweep.scalping.runner import ModeSlot
 from goldsweep.storage.db import Database
-from tests.helpers import bars, only_spec_model, quiet, utc, with_recovery, without_grade_filter
+from tests.helpers import (
+    bars,
+    only_spec_model,
+    quiet,
+    utc,
+    with_grade_filters,
+    with_recovery,
+    without_grade_filter,
+)
 from tests.test_s9_modes import T0, StubBook, position, runner, signal_row, store
 from tests.test_scalp_book import T0 as BOOK_T0
 from tests.test_scalp_book import bar, book
@@ -74,7 +82,7 @@ def unfiltered(recovering: Settings) -> Settings:
 
 @pytest.fixture
 def filtered(recovering: Settings) -> Settings:
-    return only_spec_model(recovering)
+    return with_grade_filters(only_spec_model(recovering))
 
 
 # --------------------------------------------------------------------------- #
@@ -101,7 +109,8 @@ def test_the_recovery_settings(settings: Settings) -> None:
     assert recovery.close_when_setup_done  # the setup-done close stays on
     assert settings.config.execution.max_total_lots == 2.0
     scalper = settings.config.scalper
-    assert (scalper.intraday.grade_filter, scalper.intraday.setup_window_min) == ("b", 240)
+    # The owner switched intraday's (and HFT's) filter off (D117); swing keeps A+ to B.
+    assert (scalper.intraday.grade_filter, scalper.intraday.setup_window_min) == ("off", 240)
     assert (scalper.swing_scalp.grade_filter, scalper.swing_scalp.setup_window_min) == ("b", 480)
     # The built-in defaults keep every recovery feature off.
     off = ScalperConfig().recovery

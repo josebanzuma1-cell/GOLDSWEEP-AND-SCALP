@@ -48,7 +48,7 @@ from goldsweep.scalping.logic import mode_management
 from goldsweep.scalping.plan import LadderCosts, scalp_plan, scalp_risk
 from goldsweep.scalping.runner import ModeSlot, ScalperRunner, risk_free
 from goldsweep.storage.db import Database
-from tests.helpers import only_spec_model, utc, without_grade_filter
+from tests.helpers import only_spec_model, utc, with_grade_filters, without_grade_filter
 from tests.test_scalp_book import T0 as BOOK_T0
 from tests.test_scalp_book import bar, book
 from tests.test_scalp_chart import PanelHarness, panel_lines
@@ -80,8 +80,9 @@ def unfiltered(settings: Settings) -> Settings:
 
 @pytest.fixture
 def filtered(settings: Settings) -> Settings:
-    """The spec's model only, HFT's A/A+ filter as shipped (``a``, 60 minutes)."""
-    return only_spec_model(settings)
+    """The spec's model only, HFT's A/A+ filter on (``a``, 60 minutes; shipped off
+    since D117)."""
+    return with_grade_filters(only_spec_model(settings))
 
 
 # --------------------------------------------------------------------------- #
@@ -94,9 +95,10 @@ def test_the_hft_settings(settings: Settings) -> None:
     assert (hft.split, hft.step_r, hft.grade_filter, hft.a_window_min) == (
         (0.2, 0.2, 0.2, 0.2, 0.2),
         0.25,
-        "a",
+        "off",  # the owner switched the A/A+ filter off (D117); built-in "a"
         60,
     )
+    assert HftConfig().grade_filter == "a"
     assert HftConfig(grade_filter=False).grade_filter == "off"  # YAML's unquoted off
     with pytest.raises(ValidationError, match="one to five"):
         HftConfig(split=(0.2,) * 6)

@@ -90,6 +90,9 @@ demo accounts.
   target. The shared daily limit is in money; a scalp and its adds count as one.
   The recovery features are off in the built-in defaults and in `config.yaml` (the
   owner approved S10 with them off); tests of them use `tests.helpers.with_recovery`.
+  D117: the owner switched HFT's and intraday's grade filters off in `config.yaml`
+  (built-in defaults keep them on); tests of the filters use
+  `tests.helpers.with_grade_filters`.
 - **Ticks** (D106): off since D111 (`ticks.record: false`); the code stays.
   `TickRecorder` saves each finished hour to `data/ticks/<symbol>/<YYYY-MM-DD>/<HH>.npz`
   (UTC ms, bid, ask); read them with `load_ticks`. Brokers serve ticks through

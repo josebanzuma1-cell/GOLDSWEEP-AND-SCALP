@@ -163,6 +163,8 @@ def test_built_in_defaults_equal_the_shipped_config(settings: Settings, tmp_path
     from goldsweep.core.settings import PlaybooksConfig
 
     assert settings.config.execution.max_total_lots == 2.0
+    scalper = settings.config.scalper
+    assert (scalper.hft.grade_filter, scalper.intraday.grade_filter) == ("off", "off")
     spec_values = {key: spec for key, (spec, _) in OWNER_CHANGES.items()}
     spec_risk = {key: spec for key, (spec, _) in OWNER_RISK_CHANGES.items()}
     windows = settings.config.sessions
@@ -192,6 +194,14 @@ def test_built_in_defaults_equal_the_shipped_config(settings: Settings, tmp_path
             ),
             # D116: the owner raised the lot cap to 2; the built-in default stays 1.
             "execution": settings.config.execution.model_copy(update={"max_total_lots": 1.0}),
+            # D117: the owner switched HFT's and intraday's grade filters off; the
+            # built-in defaults keep them on (A or A+, and A+ to B).
+            "scalper": scalper.model_copy(
+                update={
+                    "hft": scalper.hft.model_copy(update={"grade_filter": "a"}),
+                    "intraday": scalper.intraday.model_copy(update={"grade_filter": "b"}),
+                }
+            ),
         }
     )
     assert shipped.playbooks == PlaybooksConfig()

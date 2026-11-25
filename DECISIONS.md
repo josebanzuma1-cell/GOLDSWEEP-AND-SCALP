@@ -2291,3 +2291,31 @@ in `config.yaml`); the code, caps and tests stay, so any one can be switched on 
 What runs: intraday and swing follow A+, A or B setups, HFT follows A or A+, every scalp
 closes when its setup reaches its last target, the daily limit counts money, and the
 lot cap is 2. Tests of the features use `tests.helpers.with_recovery`.
+
+### D117. All scalper modes on the demo account; HFT and intraday without the grade filter
+
+**The owner's request (2026-11-25):** approve every scalper mode on the demo account, and
+switch the grade filter off for HFT and intraday "for now".
+
+**Done:**
+
+- `scalper.approved` is now `[hft, intraday, swing]`, as three `/approve scalper <mode>`
+  commands would set it. Selected modes send their scalps to the demo account (this is a
+  demo account, so D93's forward-test file is not needed). `/revoke scalper <mode>` returns
+  one to paper.
+- `config.yaml`: `scalper.hft.grade_filter: "off"` and
+  `scalper.intraday.grade_filter: "off"`. HFT and intraday now trade on their own rules
+  alone, as in their backtests (D111, D112), without waiting for a main-strategy setup.
+  Swing scalping still follows A+, A or B setups.
+- With no setup followed, a scalp is never closed by the setup-done rule: it runs to its
+  own stop, targets and time or flat-by exit.
+- The built-in defaults keep the filters on (HFT `a`, intraday `b`); tests of the filters
+  use `tests.helpers.with_grade_filters`.
+
+**Risk, stated:**
+
+- In the backtests without the filter, HFT lost 0.12 R a scalp after costs, with a 70%
+  drawdown over 2024-2026. Intraday lost 0.03 R, with an 18% drawdown.
+- On the demo account the caps still hold every scalp to 0.25% risk, the scalper to a 1%
+  daily loss and 8 scalps a day, with the 3-losses pause and 2 lots a magic number.
+- The recovery features stay off (D116).

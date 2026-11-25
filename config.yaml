@@ -362,7 +362,7 @@ scalper:
     mode_rules: [sweep_reclaim, opening_range, vwap_trend]
     mode_ladder: [1.0, 2.0, 3.0]
     h1_filter: true              # no entry against the H1 trend
-    grade_filter: b              # only with a live main setup graded A+, A or B (D116)
+    grade_filter: "off"          # off since 2026-11-25 (owner, D117); b = follow A+/A/B setups
     setup_window_min: 240        # ...signalled in the last 4 hours
     rules: [asian_breakout, opening_range, vwap_trend]
     breakout_buffer_atr: 0.1     # a breakout close clears the range by this much
@@ -419,7 +419,7 @@ scalper:
   hft:
     split: [0.2, 0.2, 0.2, 0.2, 0.2]   # TP1..TP5, in whole lot steps
     step_r: 0.25                 # TP1..TP5 at 0.25/0.5/0.75/1.0/1.25 R (cost gate may widen)
-    grade_filter: a              # a (A or A+) | a_plus (A+ only) | "off" (any direction)
+    grade_filter: "off"          # off since 2026-11-25 (owner, D117); a = only A/A+ directions
     a_window_min: 60             # an A/A+ setup allows HFT its way for at most 60 minutes,
                                  # and only until it reaches its target, is stopped or closed
   # The owner's capped recovery features (S10, D116), scalper only, paper and demo

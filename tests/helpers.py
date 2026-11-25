@@ -44,6 +44,21 @@ def without_grade_filter(settings: Settings) -> Settings:
     )
 
 
+def with_grade_filters(settings: Settings) -> Settings:
+    """``settings`` with every mode following graded setups as D115/D116 built it (HFT A or
+    A+, intraday and swing A+ to B); the owner switched HFT's and intraday's off (D117)."""
+    scalper = settings.config.scalper
+    update = {
+        "hft": scalper.hft.model_copy(update={"grade_filter": "a"}),
+        "intraday": scalper.intraday.model_copy(update={"grade_filter": "b"}),
+        "swing_scalp": scalper.swing_scalp.model_copy(update={"grade_filter": "b"}),
+    }
+    return dataclasses.replace(
+        settings,
+        config=settings.config.model_copy(update={"scalper": scalper.model_copy(update=update)}),
+    )
+
+
 def with_recovery(settings: Settings) -> Settings:
     """``settings`` with the owner's capped recovery features on, at D116's caps (the
     shipped config has them off since the owner's approval of S10)."""
