@@ -2467,3 +2467,9 @@ Past results do not predict future ones.
 - the backtest's retest.
 
 The older tests run with signals only and the retest switched off in the shared fixture.
+
+**The owner's approval (2026-11-25): S11 approved, with the retest for swing scalping and
+the main strategy only** (`scalper.retest.modes: [swing]`; the main strategy keeps its
+gap-middle entry and the watcher's "price is at the entry zone" alert). HFT and intraday
+scalps enter on their signal bar, as in their better backtest, and their Telegram signals
+carry no retest wording ("Enter now ~2030.00").

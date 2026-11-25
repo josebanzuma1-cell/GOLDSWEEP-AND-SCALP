@@ -436,7 +436,7 @@ scalper:
   # window ends; failed if the stop is crossed first.
   retest:
     enabled: true
-    modes: [hft, intraday, swing]
+    modes: [swing]               # the owner (D118): swing only; HFT and intraday enter at once
     pullback_r: 0.35
     tolerance_atr: 0.1
     window_hft_min: 10

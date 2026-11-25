@@ -69,8 +69,11 @@ def signals_on(settings: Settings, *, retest: bool = True) -> Settings:
     """Signals only, scalps on their retest (as shipped), the grade filters off."""
     config = settings.config
     execution = config.execution.model_copy(update={"signals_only": True})
+    modes = ("hft", "intraday", "swing")  # every mode, to test the mechanism on HFT bars
     scalper = config.scalper.model_copy(
-        update={"retest": config.scalper.retest.model_copy(update={"enabled": retest})}
+        update={
+            "retest": config.scalper.retest.model_copy(update={"enabled": retest, "modes": modes})
+        }
     )
     turned = dataclasses.replace(
         settings, config=config.model_copy(update={"execution": execution, "scalper": scalper})
@@ -89,7 +92,9 @@ def test_the_shipped_settings(tmp_path: Path) -> None:
     ).config
     assert shipped.execution.signals_only
     retest = shipped.scalper.retest
-    assert retest.enabled and retest.modes == ("hft", "intraday", "swing")
+    # The owner's choice (D118): the retest for swing scalping only (and the main
+    # strategy's gap); HFT and intraday enter at once, with no retest wording.
+    assert retest.enabled and retest.modes == ("swing",)
     assert (retest.pullback_r, retest.tolerance_atr) == (0.35, 0.1)
     assert [retest.window(m) for m in ("hft", "intraday", "swing")] == [10, 30, 60]
     assert (shipped.scalper.signal_min_grade, shipped.scalper.signal_valid_min) == ("B", 2)
@@ -459,7 +464,9 @@ def test_signals_only_sends_nothing_to_mt5(settings: Settings, db: Database) -> 
     assert demo.fake.open_positions == {} and demo.fake.sent == []
     assert db.get_state("scalper.approved") == ["hft"]  # kept, and does nothing
     assert len(h.hft.paper.pending_orders) == 1  # tracked on paper
-    assert h.notes.sent[0].startswith("📲 SCALP SIGNAL HFT B BUY XAUUSD (manual trade)")
+    lines = h.notes.sent[0].split("\n")
+    assert lines[0] == "📲 SCALP SIGNAL HFT B BUY XAUUSD (manual trade)"
+    assert lines[2] == "Enter now ~2030.00"  # no retest wording when it did not wait
 
 
 # --------------------------------------------------------------------------- #

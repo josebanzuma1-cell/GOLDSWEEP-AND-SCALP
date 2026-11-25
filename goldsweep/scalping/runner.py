@@ -927,7 +927,7 @@ class ScalperRunner:
                 graded,
                 context.analysis or Analysis(),
                 reason=candidate.reason,
-                retest=candidate.retest_level,
+                retest=candidate.retest_level if candidate.retested else None,
                 lots=size.lots if size.ok else None,
                 valid_min=self._config.scalper.signal_valid_min,
             )
