@@ -39,6 +39,24 @@ from goldsweep.storage.db import Database
 EXIT_OK = 0
 EXIT_BROKER = 1
 EXIT_CONFIG = 2
+EXIT_RUNNING = 4  # another bot is already running (D119)
+
+
+def _alone(settings: Settings, run: Callable[[], int]) -> int:
+    """Run the bot only if no other copy is running (D119): the scheduled tasks and a
+    start by hand would otherwise send every signal twice."""
+    from goldsweep.core.instance import AlreadyRunning, single_instance
+
+    try:
+        with single_instance(settings.data_dir):
+            return run()
+    except AlreadyRunning:
+        print(
+            "GoldSweep is already running (started by the scheduled task or another "
+            "window): this copy stops. Nothing was changed."
+        )
+        return EXIT_RUNNING
+
 
 #: An interactive check should answer within a couple of minutes, not retry for ten.
 CHECK_CONNECT_ATTEMPTS = 2
@@ -614,11 +632,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             return EXIT_CONFIG
         from goldsweep.live import run_live
 
-        return run_live(settings, use_llm=not args.no_llm, unattended=args.unattended)
+        return _alone(
+            settings,
+            lambda: run_live(settings, use_llm=not args.no_llm, unattended=args.unattended),
+        )
     if args.paper:
         from goldsweep.live import run_paper
 
-        return run_paper(settings, use_mock=args.mock, use_llm=not args.no_llm)
+        return _alone(
+            settings, lambda: run_paper(settings, use_mock=args.mock, use_llm=not args.no_llm)
+        )
     if args.news:
         from goldsweep.news_report import run_news
 

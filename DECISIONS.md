@@ -2473,3 +2473,35 @@ the main strategy only** (`scalper.retest.modes: [swing]`; the main strategy kee
 gap-middle entry and the watcher's "price is at the entry zone" alert). HFT and intraday
 scalps enter on their signal bar, as in their better backtest, and their Telegram signals
 carry no retest wording ("Enter now ~2030.00").
+
+### D119. Automatic start, a watchdog, no sleep, and one bot at a time
+
+**The owner's request (2026-11-25):** start the bot automatically and warn on Telegram if
+it goes quiet; set Windows never to sleep while plugged in.
+
+**Done on this PC:**
+
+- `deploy\install-tasks.ps1` installed three Task Scheduler tasks for the owner's
+  Windows user, all from logon:
+  - **GoldSweep - MetaTrader 5:** starts the terminal 10 seconds after logon.
+  - **GoldSweep - Bot:** `pythonw main.py --live --unattended`, 90 seconds after logon,
+    then started again within 5 minutes whenever it has stopped. No console window and
+    no typed confirmation. An unattended start sends no order until `/golive <account>`
+    on Telegram (it changes nothing while signals only are on).
+  - **GoldSweep - Watchdog:** every 15 minutes, a Telegram alert when the bot has gone
+    quiet while gold trades. It was run once from Task Scheduler (result 0).
+- Power plan, on AC power: sleep and hibernate set to never (`powercfg /change
+  standby-timeout-ac 0`, `hibernate-timeout-ac 0`). They were 30 minutes and 3 hours.
+  Closing a laptop's lid can still put it to sleep.
+
+**One bot at a time** (`goldsweep/core/instance.py`).
+
+- With the task restarting the bot, a copy started by hand (`Start GoldSweep LIVE.cmd`)
+  would send every signal twice.
+- `--live` and `--paper` now hold an exclusive lock on `data/goldsweep-bot.lock`. The
+  lock is on a byte past the recorded process number, so the number stays readable.
+- A second copy prints "GoldSweep is already running ... this copy stops" and exits
+  with code 4.
+- The system frees the lock when the process ends, even after a crash.
+- The bot running when this was installed was started on the older code (no lock), so
+  the Bot task was not started by hand. It starts at the next logon.
