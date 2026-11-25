@@ -105,6 +105,16 @@ class Executor(ABC):
     ) -> list[BookEvent]:
         """The kill switch: cancel every order and close every position."""
 
+    def close_plan(
+        self, when: dt.datetime, bid: float, ask: float, plan_id: str, detail: str
+    ) -> list[BookEvent]:
+        """Close one trade (its setup is done, S10): cancel its entry or close it."""
+        raise NotImplementedError
+
+    def plan_for(self, plan_id: str) -> TradePlan | None:
+        """The plan of an open trade or waiting order (S10's adds need it)."""
+        return None
+
     @abstractmethod
     def withdraw_pending(self, when: dt.datetime, detail: str) -> list[BookEvent]:
         """Withdraw every unfilled entry order (a news blackout is about to start).
@@ -252,6 +262,17 @@ class PaperExecutor(Executor):
         events = self._book.close_everything(when, bid, ask, ExitReason.MANUAL, detail)
         self._save(events)
         return events
+
+    def close_plan(
+        self, when: dt.datetime, bid: float, ask: float, plan_id: str, detail: str
+    ) -> list[BookEvent]:
+        events = self._book.close_plan(when, bid, ask, plan_id, ExitReason.SETUP_DONE, detail)
+        if events:
+            self._save(events)
+        return events
+
+    def plan_for(self, plan_id: str) -> TradePlan | None:
+        return self._book.plan_of(plan_id)
 
     def withdraw_pending(self, when: dt.datetime, detail: str) -> list[BookEvent]:
         events = self._book.withdraw_orders(when, detail)

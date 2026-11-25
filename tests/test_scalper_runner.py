@@ -173,7 +173,8 @@ def test_a_paper_scalp_is_opened_managed_closed_and_stored(
     # The stop 0.10 ATR beyond the sweep's X (2028.30). Five targets (S9): HFT's 0.25 R
     # step (0.475) is widened to 0.60 so TP1 clears twice the round-trip cost (0.30).
     assert placed == (
-        "⚡ Scalp HFT LONG 2026-11-17-HFT-001 (paper, 0.13 lots): market | SL 2028.10 | "
+        "⚡ Scalp HFT LONG 2026-11-17-HFT-001 (paper, 0.13 lots, 0.25% risk): market | "
+        "SL 2028.10 | "
         "TP 2030.60 / 2031.20 / 2031.80 / 2032.40 / 2033.00\n"
         "asia low 2028.50 swept to 2028.30, closed back inside, structure shift"
     )
@@ -393,7 +394,7 @@ def test_an_approved_mode_sends_scalps_to_the_demo_account(
     h.run_until(utc(2026, 11, 17, 8, 0))
     (placed,) = h.notes.sent
     # Sized at the ask (2030.21): 0.25% of 10,000 over 2.11 a unit is 0.11 lots.
-    assert placed.startswith("⚡ Scalp HFT LONG 2026-11-17-HFT-001 (demo account, 0.11 lots)")
+    assert placed.startswith("⚡ Scalp HFT LONG 2026-11-17-HFT-001 (demo account, 0.11 lots, ")
     positions = sorted(demo.fake.open_positions.values(), key=lambda p: p.ticket)
     # Five parts (S9), each its own position with the stop and its own target.
     assert [(p.magic, p.volume, p.sl, p.tp) for p in positions] == [
@@ -648,4 +649,5 @@ def test_scalp_context_on_paper(settings: Settings, db: Database) -> None:
         events=(),
         modes=frozenset(),
         demo_modes=frozenset(),
+        setups={},
     )

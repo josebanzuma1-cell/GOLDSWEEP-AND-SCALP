@@ -154,10 +154,12 @@ def test_three_children_forty_thirty_thirty() -> None:
 
 def test_the_scalper_risk_settings_and_management(settings: Settings) -> None:
     risk = scalp_risk(settings.config)
+    # A scalp's parts are one position; its adds and stacked HFT scalps are more (S10):
+    # three a mode, and the per-mode counts leave room for two adds a scalp.
     assert (risk.risk_per_trade_pct, risk.max_open_positions, risk.max_trades_per_day) == (
         0.25,
-        1,
-        8,
+        3,
+        24,
     )
     assert (risk.daily_loss_limit_pct, risk.max_spread_multiple, risk.breakeven_at_r) == (
         1.0,

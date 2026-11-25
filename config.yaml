@@ -223,7 +223,8 @@ execution:
   # LIVE only (python main.py --live, needs MODE=LIVE in .env AND mode: LIVE here):
   magic_number: 7341926   # marks the bot's own orders and positions in MT5
   deviation_points: 30    # largest accepted price difference on a market order
-  max_total_lots: 1.0     # never more lots than this open at once
+  max_total_lots: 2.0     # never more lots than this open at once (per magic number;
+                          # the owner's choice, D116; built-in 1.0)
   min_margin_level_pct: 1000   # refuse orders that would take margin level below this
   allow_real_account: false    # Phase 6 trades DEMO accounts only
   sync_seconds: 5         # compare orders and positions with MT5 this often
@@ -361,6 +362,8 @@ scalper:
     mode_rules: [sweep_reclaim, opening_range, vwap_trend]
     mode_ladder: [1.0, 2.0, 3.0]
     h1_filter: true              # no entry against the H1 trend
+    grade_filter: b              # only with a live main setup graded A+, A or B (D116)
+    setup_window_min: 240        # ...signalled in the last 4 hours
     rules: [asian_breakout, opening_range, vwap_trend]
     breakout_buffer_atr: 0.1     # a breakout close clears the range by this much
     sl_buffer_atr: 0.1
@@ -402,6 +405,8 @@ scalper:
     sl_min_atr: 0.5
     sl_max_atr: 3.0
     ladder: [1.0, 2.0, 3.0]
+    grade_filter: b              # only with a live main setup graded A+, A or B (D116)
+    setup_window_min: 480        # ...signalled in the last 8 hours
     max_hold_hours: 48
     weekend_buffer_min: 60       # flat this long before the Friday close
   # The H1 trend of the intraday and swing modes (D112), built from the M1 feed.
@@ -417,5 +422,20 @@ scalper:
     grade_filter: a              # a (A or A+) | a_plus (A+ only) | "off" (any direction)
     a_window_min: 60             # an A/A+ setup allows HFT its way for at most 60 minutes,
                                  # and only until it reaches its target, is stopped or closed
+  # The owner's capped recovery features (S10, D116), scalper only, paper and demo
+  # accounts only (never a real account). They do not turn a losing edge into a winning
+  # one; they change how losses fall. Every order keeps its stop-loss and take-profit;
+  # the 1% daily loss, the 3-losses pause and the 0.75% open-risk ceiling still apply.
+  # The built-in defaults have them off.
+  recovery:
+    martingale: {enabled: true, multiplier: 2.0, max_steps: 1, max_risk_pct: 0.5}
+    #   after a losing scalp the mode's next one risks 0.5%, back to 0.25% after a win
+    average_down: {enabled: true, add_at_r: [0.4, 0.7], add_risk_pct: 0.125}
+    #   grid / averaging down: adds at 0.4 R and 0.7 R against, same stop, TP at TP1
+    max_idea_risk_pct: 0.5       # a scalp and its adds together
+    hft_stack: {enabled: true, max_open: 3}   # only while every open HFT scalp is risk-free
+    hedge_modes: true            # modes may hold opposite sides; never against the main strategy
+    close_when_setup_done: true  # close a scalp when its setup reaches its last target
+    max_open_per_mode: 3
 
 display_timezone: Africa/Kampala

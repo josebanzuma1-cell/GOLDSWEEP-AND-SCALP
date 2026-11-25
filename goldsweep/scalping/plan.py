@@ -32,14 +32,19 @@ _EPSILON = 1e-9
 def scalp_risk(config: AppConfig) -> RiskConfig:
     """The risk settings of the scalper's own book (D91): the main ones, with its limits."""
     limits = config.scalper.risk
+    recovery = config.scalper.recovery
+    # Each add of a scalp is its own trade in the book (S10): the per-mode counts leave
+    # room for them; the runner's shared rules count a scalp and its adds as one.
+    per_idea = 1 + (len(recovery.average_down.add_at_r) if recovery.average_down.enabled else 0)
     return config.risk.model_copy(
         update={
             "risk_per_trade_pct": limits.risk_per_scalp_pct,
-            "max_open_positions": 1,  # one active scalp (its children are one position)
-            "max_trades_per_day": limits.max_scalps_per_day,
-            "max_trades_per_session": limits.max_scalps_per_day,
+            # A scalp's parts are one position; adds and stacked HFT scalps are more (S10).
+            "max_open_positions": recovery.max_open_per_mode,
+            "max_trades_per_day": min(50, limits.max_scalps_per_day * per_idea),
+            "max_trades_per_session": min(50, limits.max_scalps_per_day * per_idea),
             "daily_loss_limit_pct": limits.daily_loss_limit_pct,
-            "max_consecutive_losses": limits.max_consecutive_losses,
+            "max_consecutive_losses": min(20, limits.max_consecutive_losses * per_idea),
             "max_spread_multiple": limits.max_spread_multiple,
             "breakeven_at_r": 0.0,  # breakeven comes with TP1, as for every trade
             "target_mode": "pools",  # the ladder is the scalper's own

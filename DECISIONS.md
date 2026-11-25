@@ -2142,3 +2142,144 @@ whole steps, the ladder on paper and on the fake MT5 account, the HFT plan and i
 gate, two modes side by side, the panel's list command, no hedging or stacking across
 modes, the shared daily limits, every way an A/A+ setup stops allowing HFT, and the
 filter end to end in the bot); the older HFT figures moved to the five-part ladder.
+
+### D116. S10: the owner's capped recovery features for the scalper; every mode follows graded setups
+
+**The owner's request (2026-11-25):** add martingale, grid, averaging down and hedging
+"while keeping the risks reasonable", because A and A+ setups should lift HFT's win
+rate towards 70%; let intraday and swing scalping auto-trade A+ to B setups; stop the
+trades once the setup has done its move in our favour and wait for the next; in HFT,
+stack trades only while price is moving our way; a lot cap (10 asked, 2 chosen).
+
+**The rule this changes.** Rule 2 ("no martingale, grid, averaging down or hedging to
+recover losses") was written as never relaxed. Before building, the owner was shown in
+plain numbers why these features cannot make a losing edge win:
+
+- doubling after each loss from 0.25% costs 7.75% of the account after five losses in
+  a row;
+- at a 70% win rate, HFT's small ladder wins (about 0.3 R) against 1 R losses still
+  lose about 0.09 R a scalp.
+
+The owner then chose **"Build all four, capped"**, after first answering "keep all" and
+then clarifying it. **This is the owner's decision, recorded here.** Rule 2 now names this
+one exception (CLAUDE.md):
+
+- scalper only;
+- paper and demo accounts only, never a real account;
+- within the caps below.
+
+The main strategy keeps rule 2 unchanged.
+
+**The caps** (per account: all paper books together, or the demo account):
+
+| Limit | Value |
+|---|---|
+| One scalp's risk, a martingale step included | at most 0.5% |
+| A scalp plus its grid / averaging-down adds | at most 0.5% together |
+| Open scalper risk | at most 0.75% of equity (on demo with the main strategy, through the account guard) |
+| Daily scalper loss | 1%, now counted in money; a new scalp is sized down to what is left after the open risk, and skipped when nothing is left |
+| Losses in a row | 3 pause every mode for 24 hours; a scalp and its adds count as one |
+| Open positions per mode | at most 3 |
+| Lots | at most 2 per magic number (`execution.max_total_lots: 2.0`, built-in 1.0) |
+| Stop-loss and take-profit | on every order, adds included |
+| Built-in defaults | everything off; `config.yaml` turns it on |
+
+**Built** (`goldsweep/scalping/recovery.py`, pure functions shared by the runner and
+`mode_backtest`):
+
+- **Martingale** (`martingale_risk`).
+  - After a losing scalp of a mode, that mode's next scalp risks the base × 2 (one step,
+    so 0.25% becomes 0.5%).
+  - It goes back to the base after a win or at a new trading day.
+  - The results come from that account's stored scalps of the mode, a scalp and its adds
+    counted as one.
+- **Grid and averaging down, built as one mechanism** (`add_due`, `add_plan`).
+  - While a scalp still has its first stop, a bar closing 0.4 R, then 0.7 R, against its
+    entry adds a market position of 0.125% risk.
+  - Each add has the same stop and one take-profit at the scalp's TP1. Its id is
+    `<id>-A1` or `-A2`.
+  - There are no adds once the stop has moved, when the setup it follows is no longer
+    live, or past the 0.5% idea cap. A martingale-stepped scalp at 0.5% therefore gets
+    none.
+  - "Grid" and "averaging down" are the same thing here: evenly spaced entries inside
+    one stop. A separate grid of orders on both sides was not built: it would be a hedge
+    inside one mode.
+- **HFT stacking** (`stack_refusal`).
+  - Up to 3 HFT scalps at once.
+  - A new one opens only while every open HFT position is risk-free (its stop at or past
+    its entry, i.e. after TP1, the sign that price moved our way) and its setup is live.
+- **Hedging between scalper modes** (`shared_refusal(hedge=True)`).
+  - One mode may hold the side opposite another mode's scalp.
+  - Never against the main strategy: `AccountGuard.check(hedge_exposures=...)` counts only
+    the main strategy's side for its no-hedging rule, and a main order still closes
+    opposite demo scalps first (D92).
+  - Same-way scalps across modes still need the open one risk-free.
+- **Sizing per plan:** `TradePlan.risk_pct` (at most 2%), used by `RiskManager.size` in
+  the paper book and `MT5Executor.submit`, and saved with the plan. Placed-scalp messages
+  show the risk and why (martingale step, sized to the daily budget, stacked, add n of 2).
+- **Every mode follows graded setups.**
+  - HFT keeps A or A+ within 60 minutes.
+  - Intraday follows A+, A or B within 4 hours; swing scalping A+, A or B within 8 hours
+    (`grade_filter: b`, `setup_window_min`).
+  - `Trader._mode_setups` reads them for each selected mode.
+- **Stop when the setup is done.**
+  - The runner remembers the setup each scalp follows (`scalper.follows`, kept over a
+    restart).
+  - When that setup reaches its last target, the scalp and its adds are closed at market
+    with exit `setup_done` (`close_plan` on the paper book and the MT5 executor). The
+    mode then waits for the next setup.
+  - A failed setup closes nothing: the scalp's own stop handles it.
+- **Not built:** the 10-lot cap (the owner chose 2), and recovery features on a real
+  account or in the main strategy.
+- **A flaw found by the backtest and fixed before reporting.** A bar can close far past
+  an add's level, right next to the stop. The first version then sized the add on that
+  tiny distance (2.99 lots for 0.125%), and a gap through the stop lost 0.95% at once.
+  Now an add is never larger than it would be at its own level: its risk shrinks in
+  proportion when the close is nearer the stop (`add_plan(level_r=...)`).
+
+**The backtests** (`mode_backtest`, 2024-01-01..2026-10-31, a 10,000 balance, this
+account's costs; trades include adds; the grade filters, the setup-done close and
+hedging between modes cannot be replayed):
+
+| Mode | Recovery | Trades | Won | PF | R a trade | Return | Max DD | Worst trading day |
+|---|---|---|---|---|---|---|---|---|
+| HFT | on | 5,455 | 57.2% | 0.55 | -0.16 | -86.1% | 86.1% | -1.04% |
+| HFT | off | 4,153 | 62.6% | 0.56 | -0.12 | -69.6% | 69.6% | |
+| Intraday | on | 2,616 | 37.8% | 0.91 | -0.06 | -23.2% | 31.6% | -1.11% |
+| Intraday | off | 1,381 | 50.3% | 0.93 | -0.03 | -10.8% | 18.3% | |
+| Swing scalping | on | 1,437 | 35.5% | 0.81 | -0.12 | -22.8% | 24.4% | -0.99% |
+| Swing scalping | off | 817 | 46.8% | 0.85 | -0.07 | -12.0% | 13.6% | |
+
+**What this shows.**
+
+- In every mode the recovery features roughly double the loss and deepen the drawdown.
+  Adds fill on the way to the stop and mostly stop out with the scalp; martingale steps
+  come after losses, when the next scalp is no likelier to win.
+- The caps work: the worst trading day stays near the 1% limit. The overshoot, up to
+  0.11%, is fills beyond the stop.
+- The win rate does not rise towards 70%. Without the A filter, HFT wins 57-63%, and its
+  wins are too small for that to pay.
+- Whether the A/A+ filter changes this is the open question. It can only be judged on
+  paper and the demo account (D111), with the recovery features switched on or off in
+  `config.yaml`.
+
+Past results do not predict future ones.
+
+**Checked here:**
+
+- 1,049 tests. The new `tests/test_s10_recovery.py` covers:
+  - settings and defaults;
+  - martingale steps and resets;
+  - add levels, sizing and caps;
+  - stacking rules;
+  - open risk and the daily budget;
+  - per-plan sizing on paper and the fake MT5;
+  - `close_plan`;
+  - the guard's hedge rule and hedging between modes;
+  - a scalp and its adds counted as one;
+  - no recovery on a real account;
+  - the martingale step, grid adds, stacking and the setup-done close in the bot;
+  - B-grade setups for intraday and swing;
+  - a sliver of daily budget.
+- The older pins moved: messages now show each scalp's risk, the per-mode book limits
+  rose, and the daily limit is in money.

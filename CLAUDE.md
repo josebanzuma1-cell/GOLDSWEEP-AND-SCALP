@@ -13,8 +13,10 @@ Its logic is `goldsweep/scalping/` (one closed bar at a time, like the main engi
 its position rules are the trade book's `Management`, applied by the paper book and by
 `MT5Executor._manage` with the same functions. S1 found it loses after costs (D101).
 `docs/SCALPER_MODES.md` (D102-D107) gave it modes behind a switch; D111 replaced the
-evidence gate with paper then demo testing. Latency arbitrage, news spikes, grids,
-martingale, hedging and stacking are never built.
+evidence gate with paper then demo testing. Latency arbitrage and news spikes are
+never built. Martingale, grid / averaging down, hedging between scalper modes and HFT
+stacking exist only as the owner's capped scalper features (S10, D116), on paper and
+demo accounts.
 - **The switch** (S2, D108): `config.yaml switch:` gives the defaults, `/mode` and
   `/scalper` (Telegram, or `mode:<x>` / `scalper:<x>` dashboard commands) change them,
   stored as `switch.*` state. `scalping/modes.py::REGISTRY` says which modes are built;
@@ -72,6 +74,21 @@ martingale, hedging and stacking are never built.
   the "A+ possible" forming setups, judged against `ScalperRunner.path`); a done setup
   stops new HFT scalps, never closes an open one. Tests of what a scalp does once placed
   use `tests.helpers.without_grade_filter`.
+- **Capped recovery, setups followed** (S10, D116): `scalping/recovery.py` holds the
+  pure rules, used by the runner and `mode_backtest` alike: `martingale_risk` (the next
+  scalp's risk after a loss, `scalper.recovery.martingale`), `add_due` / `add_plan`
+  (grid and averaging down as one mechanism: adds at `add_at_r` R against, same stop,
+  one TP at the scalp's TP1, ids `<id>-A1`), `stack_refusal` (HFT stacks only while every
+  open HFT position is risk-free), `budget_pct` (a new scalp never risks more than the
+  day's 1% leaves after open risk). `ScalperRunner.recovery_on` keeps them to paper and
+  demo accounts; `shared_refusal(hedge=...)` lets modes hold opposite sides, never the
+  main strategy (`AccountGuard.check(hedge_exposures=...)`). A plan may carry its own
+  `TradePlan.risk_pct` (sized by `RiskManager.size`, capped at 2%). Every mode follows
+  graded setups (`ScalpContext.setups`, `Trader._mode_setups`: HFT A/A+, intraday and
+  swing A+..B); the runner remembers the setup each scalp follows (`scalper.follows`)
+  and closes it with `close_plan` (exit `setup_done`) once that setup reaches its last
+  target. The shared daily limit is in money; a scalp and its adds count as one.
+  Built-in defaults keep the recovery features off; `config.yaml` turns them on.
 - **Ticks** (D106): off since D111 (`ticks.record: false`); the code stays.
   `TickRecorder` saves each finished hour to `data/ticks/<symbol>/<YYYY-MM-DD>/<HH>.npz`
   (UTC ms, bid, ask); read them with `load_ticks`. Brokers serve ticks through
@@ -100,7 +117,11 @@ martingale, hedging and stacking are never built.
    comments, UI text or docs. The goal is small, controlled losses and positive
    expectancy.
 2. Every order carries a hard stop-loss and take-profit when it is sent. No
-   martingale, grid, averaging down or hedging to recover losses.
+   martingale, grid, averaging down or hedging to recover losses. The one exception
+   is the owner's decision of 2026-11-25 (D116): the scalper's capped recovery
+   features, on paper and demo accounts only, within `scalper.recovery`'s caps. The
+   main strategy never uses them; never widen the caps or extend them to a real
+   account or the main strategy without the owner.
 3. PAPER is the default. LIVE needs `MODE=LIVE` in `.env`, `mode: LIVE` in
    `config.yaml` and a typed confirmation at startup. Build and test on a demo
    MT5 account.

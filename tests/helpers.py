@@ -29,15 +29,18 @@ def only_spec_model(settings: Settings) -> Settings:
 
 
 def without_grade_filter(settings: Settings) -> Settings:
-    """``settings`` with HFT's A/A+ filter off (S9, D115), for tests of what the scalper
-    does with a setup once it may trade (the filter has its own tests)."""
+    """``settings`` with the scalper modes' grade filters off (S9, S10), for tests of what
+    the scalper does with a setup once it may trade (the filters have their own tests)."""
     scalper = settings.config.scalper
-    hft = scalper.hft.model_copy(update={"grade_filter": "off"})
+    off = {"grade_filter": "off"}
+    update = {
+        "hft": scalper.hft.model_copy(update=off),
+        "intraday": scalper.intraday.model_copy(update=off),  # S10: A+ to B
+        "swing_scalp": scalper.swing_scalp.model_copy(update=off),
+    }
     return dataclasses.replace(
         settings,
-        config=settings.config.model_copy(
-            update={"scalper": scalper.model_copy(update={"hft": hft})}
-        ),
+        config=settings.config.model_copy(update={"scalper": scalper.model_copy(update=update)}),
     )
 
 

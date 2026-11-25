@@ -457,7 +457,7 @@ class MT5Executor(Executor):
                 f"price {market_price:.2f} is no longer between the stop and TP1",
             )
 
-        size = self.manager.size(entry, plan.stop_loss, spec)
+        size = self.manager.size(entry, plan.stop_loss, spec, plan.risk_pct)
         if not size.ok:
             return self._rejected(plan, now, Outcome.NO_SIZE, size.reason or "no size")
         lots = size.lots
@@ -982,6 +982,23 @@ class MT5Executor(Executor):
         return self._enforce_stops(note=detail)
 
     # -- the kill switch and the restart ------------------------------------------------- #
+
+    def plan_for(self, plan_id: str) -> TradePlan | None:
+        return next((g.plan for g in self._groups if g.plan.id == plan_id), None)
+
+    def close_plan(
+        self, when: dt.datetime, bid: float, ask: float, plan_id: str, detail: str
+    ) -> list[BookEvent]:
+        """Close one trade's positions at market (its setup is done, S10); an unfilled
+        entry is withdrawn. Waits while unarmed, like every order."""
+        events = self.sync(when)  # a market entry counts as open only once it is read
+        for group in [g for g in self._groups if g.plan.id == plan_id]:
+            if group.status == PENDING:
+                events += self._withdraw(group, EventKind.CANCELLED, Outcome.CANCELLED, detail)
+            elif group.status == OPEN:
+                self._close_group(group, ExitReason.SETUP_DONE, "setup done")
+        self._save()
+        return events + self.sync(when)
 
     def close_everything(
         self, when: dt.datetime, bid: float, ask: float, detail: str

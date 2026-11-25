@@ -90,11 +90,18 @@ class AccountGuard:
         direction: Direction,
         new_risk: float,
         exposures: Sequence[Exposure],
+        hedge_exposures: Sequence[Exposure] | None = None,
     ) -> RiskDecision:
-        """May a new scalp in ``direction`` risking ``new_risk`` open now?"""
+        """May a new scalp in ``direction`` risking ``new_risk`` open now?
+
+        ``exposures`` (both strategies) count for the open-risk ceiling;
+        ``hedge_exposures`` (the main strategy's, when scalper modes may hold opposite
+        sides of each other, S10) for the no-hedging rule, which otherwise reads all.
+        """
         instant = ensure_utc(now)
         reasons: list[str] = []
-        if any(e.direction is not direction for e in exposures):
+        sides = exposures if hedge_exposures is None else hedge_exposures
+        if any(e.direction is not direction for e in sides):
             reasons.append("the other strategy holds the opposite side (no hedging)")
         if equity > 0:
             open_risk = sum(e.risk_amount for e in exposures) + new_risk

@@ -229,8 +229,12 @@ class RiskManager:
         if equity > 0:
             self._equity = float(equity)
 
-    def size(self, entry: float, stop: float, spec: SymbolSpec) -> PositionSize:
-        return position_size(self._equity, entry, stop, spec, self._risk.risk_per_trade_pct)
+    def size(
+        self, entry: float, stop: float, spec: SymbolSpec, risk_pct: float | None = None
+    ) -> PositionSize:
+        """Lots for ``risk_pct`` of equity (the risk settings' share when None)."""
+        pct = self._risk.risk_per_trade_pct if risk_pct is None else risk_pct
+        return position_size(self._equity, entry, stop, spec, pct)
 
     # -- events ------------------------------------------------------------- #
 

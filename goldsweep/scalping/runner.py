@@ -20,10 +20,19 @@ Called once a minute by the bot (under its lock). Each call:
    blackout). The order goes in at market.
 
 **Shared rules** (S9, D115), per account (all paper books together, or the demo
-account): no scalp against another mode's open scalp (no hedging); a second scalp the
-same way only when every scalp open that way is risk-free, its stop at or past its
-entry (no stacking); and one set of daily limits for all modes: the scalper's daily
-loss in R, its scalps a day, and the pause after losses in a row.
+account): no scalp against another mode's open scalp (no hedging, unless the owner's
+``recovery.hedge_modes`` allows modes on opposite sides, S10); a second scalp the same
+way only when every scalp open that way is risk-free, its stop at or past its entry
+(no stacking); and one set of daily limits for all modes: the scalper's daily loss in
+money, its scalps a day and the pause after losses in a row, a scalp and its adds
+counting as one.
+
+**The owner's capped recovery features** (S10, D116; :mod:`~goldsweep.scalping.recovery`),
+on paper and a demo account only, never a real account: martingale sizing after a loss,
+grid / averaging-down adds inside a scalp's first stop, HFT stacking while every open
+HFT scalp is risk-free. Every mode follows the main strategy's graded setups (HFT A or
+A+, intraday and swing A+, A or B); a scalp whose setup reaches its last target is
+closed (``setup_done``) and the mode waits for the next one.
 
 Each mode has a **paper** book (its own notional balance) and, on a live bot, a
 **demo** executor on the same MT5 account with the mode's own magic number; an
@@ -36,7 +45,7 @@ from __future__ import annotations
 import datetime as dt
 from collections import deque
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pandas as pd
 
@@ -49,7 +58,7 @@ from goldsweep.core.logging import get_logger
 from goldsweep.core.settings import Settings
 from goldsweep.core.types import Timeframe
 from goldsweep.data.broker import BrokerClient, BrokerError, SymbolSpec
-from goldsweep.execution.book import Bar, BookEvent, EventKind, ExitReason, to_ns
+from goldsweep.execution.book import Bar, BookEvent, EventKind, ExitReason, TradePlan, to_ns
 from goldsweep.execution.executor import (
     SCALP_LIVE_TABLE,
     SCALP_PAPER_TABLE,
@@ -60,10 +69,31 @@ from goldsweep.execution.executor import (
 )
 from goldsweep.risk.account_guard import AccountGuard, Exposure
 from goldsweep.risk.risk_manager import PAUSE_AFTER_LOSSES, NewsEvent
-from goldsweep.scalping.grade_filter import GRADE_NAMES, GradedSetup, PathBar, hft_permission
+from goldsweep.scalping.grade_filter import (
+    GRADE_NAMES,
+    GradedSetup,
+    PathBar,
+    ended,
+    followed,
+    hft_permission,
+    target_reached,
+)
 from goldsweep.scalping.logic import HFT, INTRADAY, SWING, Candidate, ModeLogic, make_logic
 from goldsweep.scalping.modes import REGISTRY
 from goldsweep.scalping.plan import LadderCosts, scalp_risk
+from goldsweep.scalping.recovery import (
+    OpenScalp,
+    add_due,
+    add_plan,
+    budget_pct,
+    idea_room,
+    is_add,
+    martingale_risk,
+    open_risk,
+    primary_of,
+    stack_refusal,
+)
+from goldsweep.scalping.stats import mode_of
 from goldsweep.storage.db import Database
 
 log = get_logger(__name__)
@@ -88,6 +118,11 @@ COMMENTS = {HFT: "GS-SC", INTRADAY: "GS-SI", SWING: "GS-SW"}
 #: Kept for callers of S5.
 PAPER_STATE, DEMO_STATE = PAPER_STATES[HFT], DEMO_STATES[HFT]
 IDS_STATE = "scalper.ids"
+#: The setup each open scalp follows, and the risk of each scalp's adds (S10, D116).
+FOLLOWS_STATE = "scalper.follows"
+ADDS_STATE = "scalper.adds"
+#: The mode names the filters' messages use.
+LABELS = {HFT: "HFT", INTRADAY: "intraday", SWING: "swing scalping"}
 MEDIAN_SPREAD_DAYS = 20
 MINUTE = dt.timedelta(minutes=1)
 #: A setup older than this when the job sees it (the bot was busy) is not traded.
@@ -120,6 +155,14 @@ class ScalpContext:
     demo_modes: frozenset[str] | None = None  # those approved for the demo account
     #: The main strategy's A/A+ setups HFT may follow (``None``: the filter is off).
     hft_setups: Sequence[GradedSetup] | None = None
+    #: Each mode's graded setups to follow (S10); a mode missing or None: no filter.
+    setups: Mapping[str, Sequence[GradedSetup] | None] | None = None
+
+    def setups_for(self, mode: str) -> Sequence[GradedSetup] | None:
+        """The setups ``mode`` follows (``None``: it may trade either way)."""
+        if self.setups is not None:
+            return self.setups.get(mode)
+        return self.hft_setups if mode == HFT else None
 
     @property
     def selected(self) -> frozenset[str]:
@@ -253,6 +296,15 @@ class ScalperRunner:
         self.last_close: float | None = None
         #: Recent M1 highs and lows: has an A/A+ setup reached its target or failed?
         self.path: deque[PathBar] = deque(maxlen=PATH_BARS)
+        #: The setup each open scalp follows (S10), and each scalp's adds' risk in %.
+        self.follows: dict[str, GradedSetup] = {
+            key: GradedSetup.from_state(value)
+            for key, value in dict(db.get_state(FOLLOWS_STATE, {})).items()
+        }
+        self.adds: dict[str, list[float]] = {
+            key: [float(v) for v in value]
+            for key, value in dict(db.get_state(ADDS_STATE, {})).items()
+        }
 
     @classmethod
     def build(
@@ -322,6 +374,26 @@ class ScalperRunner:
     def busy(executor: Executor) -> bool:
         return bool(executor.open_positions or executor.pending_orders)
 
+    @staticmethod
+    def recovery_on(slot: ModeSlot, executor: Executor) -> bool:
+        """The owner's recovery features run on paper and a demo account, never a real one."""
+        return executor is slot.paper or bool(getattr(executor, "demo", False))
+
+    def _filter(self, mode: str) -> tuple[str, dt.timedelta]:
+        """The grades ``mode`` follows and how long a setup may lead it (S9, S10)."""
+        scalper = self._config.scalper
+        if mode == HFT:
+            return scalper.hft.grade_filter, dt.timedelta(minutes=scalper.hft.a_window_min)
+        if mode == INTRADAY:
+            intraday = scalper.intraday
+            return intraday.grade_filter, dt.timedelta(minutes=intraday.setup_window_min)
+        swing = scalper.swing_scalp
+        return swing.grade_filter, dt.timedelta(minutes=swing.setup_window_min)
+
+    def _save_follows(self) -> None:
+        self._db.set_state(FOLLOWS_STATE, {k: v.to_state() for k, v in self.follows.items()})
+        self._db.set_state(ADDS_STATE, self.adds)
+
     # -- each minute ----------------------------------------------------------------- #
 
     def step(self, context: ScalpContext) -> list[str]:
@@ -363,8 +435,11 @@ class ScalperRunner:
                     for executor in slot.executors:
                         events = executor.on_bar(bar, line=slot.logic.line)
                         texts += self._report(slot, executor, events)
+                if not warmup and i == newest:
+                    texts += self._setup_done(slot, now)
                 if warmup or i != newest or slot.name not in context.selected:
                     continue
+                texts += self._add_if_due(slot, context, c, start + MINUTE, now)
                 if not candidates:
                     slot.decision = Decision(start + MINUTE, "NONE", "no setup on the last bar")
                 for candidate in candidates:
@@ -378,13 +453,241 @@ class ScalperRunner:
 
     def _report(self, slot: ModeSlot, executor: Executor, events: Sequence[BookEvent]) -> list[str]:
         texts: list[str] = []
+        changed = False
         for event in events:
+            if event.kind in (EventKind.CLOSED, EventKind.CANCELLED, EventKind.EXPIRED):
+                plan_id = event.plan.id
+                changed |= self.follows.pop(plan_id, None) is not None
+                if not is_add(plan_id) and not self._still_open(plan_id):
+                    changed |= self.adds.pop(plan_id, None) is not None
             if event.kind is EventKind.CLOSED and event.trade is not None:
                 trade = event.trade
                 if trade.exit_reason is ExitReason.STOP:
                     slot.stopped_out[trade.direction] = trade.exit_time
                 texts.append(messages.scalp_closed(trade, slot.name, slot.where(executor)))
+        if changed:
+            self._save_follows()
         return texts
+
+    def _still_open(self, plan_id: str) -> bool:
+        return any(p["id"] == plan_id for e in self.executors for p in e.open_positions) or any(
+            plan.id == plan_id for e in self.executors for plan in e.pending_orders
+        )
+
+    # -- S10: the setup is done; grid / averaging down -------------------------------- #
+
+    def _setup_done(self, slot: ModeSlot, now: dt.datetime) -> list[str]:
+        """Close every scalp (and add) of ``slot`` whose setup reached its last target:
+        the move is done; the mode waits for the next setup (S10, D116)."""
+        if not self._config.scalper.recovery.close_when_setup_done:
+            return []
+        texts: list[str] = []
+        tick = None
+        for executor in slot.executors:
+            ids = {p["id"] for p in executor.open_positions}
+            ids |= {plan.id for plan in executor.pending_orders}
+            for plan_id in sorted(ids):
+                setup = self.follows.get(plan_id)
+                if setup is None or not target_reached(setup, self.path):
+                    continue
+                if tick is None:
+                    try:
+                        tick = self._broker.get_tick(self.spec.name)
+                    except BrokerError as exc:
+                        log.error(
+                            "scalp not closed at its setup's target: no quote", error=str(exc)
+                        )
+                        return texts
+                detail = f"the {setup.label} setup reached its target"
+                log.info("scalp closed: setup done", id=plan_id, setup=setup.id)
+                events = executor.close_plan(now, tick.bid, tick.ask, plan_id, detail)
+                texts += self._report(slot, executor, events)
+        return texts
+
+    def _add_if_due(
+        self,
+        slot: ModeSlot,
+        context: ScalpContext,
+        close: float,
+        bar_close: dt.datetime,
+        now: dt.datetime,
+    ) -> list[str]:
+        """Grid / averaging down (S10, D116): an add to an open scalp of ``slot`` whose
+        first stop still stands, once a bar closes far enough against it."""
+        recovery = self._config.scalper.recovery
+        if not recovery.average_down.enabled or not context.may_open:
+            return []
+        demo = context.on_demo(slot.name)
+        executor = slot.target(demo)
+        if not self.recovery_on(slot, executor):
+            return []
+        texts: list[str] = []
+        for position in list(executor.open_positions):
+            primary = str(position["id"])
+            plan = None if is_add(primary) else executor.plan_for(primary)
+            if plan is None:
+                continue
+            scalp = OpenScalp(plan, float(position["fill_price"]), float(position["stop"]))
+            done = self.adds.get(primary, [])
+            if not add_due(scalp, close, len(done), recovery.average_down):
+                continue
+            _grade, window = self._filter(slot.name)
+            setup = self.follows.get(primary)
+            if setup is not None and ended(setup, self.path, now, window) is not None:
+                continue  # the setup is no longer live: no more risk for it
+            base = plan.risk_pct or self._config.scalper.risk.risk_per_scalp_pct
+            pct = recovery.average_down.add_risk_pct
+            if pct > idea_room(base, done, recovery.max_idea_risk_pct) + _EPSILON:
+                continue
+            if pct > self._budget(demo, now, executor) + _EPSILON:
+                continue
+            number = len(done) + 1
+            level = recovery.average_down.add_at_r[len(done)]
+            add = add_plan(
+                scalp,
+                number,
+                close=close,
+                time=bar_close,
+                expires_at=bar_close + MINUTE,
+                risk_pct=pct,
+                level_r=level,
+            )
+            if add is None:
+                continue
+            event = self._submit(slot, executor, add, context, now, demo=demo)
+            if event is None:
+                continue
+            self.adds[primary] = [*done, add.risk_pct or pct]
+            if setup is not None:
+                self.follows[add.id] = setup
+            self._save_follows()
+            reason = (
+                f"add {number} of {len(recovery.average_down.add_at_r)} to {primary}: "
+                f"{level:g} R against (grid / averaging down), same stop, TP at its TP1"
+            )
+            texts.append(messages.scalp_placed(add, event, slot.name, slot.where(executor), reason))
+        return texts
+
+    def _submit(
+        self,
+        slot: ModeSlot,
+        executor: Executor,
+        plan: TradePlan,
+        context: ScalpContext,
+        now: dt.datetime,
+        *,
+        demo: bool,
+    ) -> BookEvent | None:
+        """Guard (on the demo account) and send an add; None when it was not placed."""
+        try:
+            spread = float(self._broker.spread_points(self.spec.name))
+        except BrokerError:
+            return None
+        if not self._guard_allows(slot, plan, context, now, demo=demo):
+            return None
+        median = self._db.median_spread(
+            self.spec.name, since=now - dt.timedelta(days=MEDIAN_SPREAD_DAYS), min_samples=30
+        )
+        event = executor.submit(
+            plan, spread_points=spread, median_spread_points=median, events=context.events
+        )
+        if event.kind is not EventKind.PLACED:
+            log.info("add not placed", id=plan.id, detail=event.detail)
+            return None
+        return event
+
+    def _guard_allows(
+        self,
+        slot: ModeSlot,
+        plan: TradePlan,
+        context: ScalpContext,
+        now: dt.datetime,
+        *,
+        demo: bool,
+    ) -> bool:
+        reason = self._guard_refusal(slot, plan, context, now, demo=demo)
+        return reason is None
+
+    def _guard_refusal(
+        self,
+        slot: ModeSlot,
+        plan: TradePlan,
+        context: ScalpContext,
+        now: dt.datetime,
+        *,
+        demo: bool,
+    ) -> str | None:
+        """The account guard on the demo account (both strategies' open risk, no hedge
+        against the main strategy), or the same open-risk ceiling on paper."""
+        limits = self._config.scalper.risk
+        pct = plan.risk_pct or limits.risk_per_scalp_pct
+        hedge = self._config.scalper.recovery.hedge_modes and self.recovery_on(
+            slot, slot.target(demo)
+        )
+        if demo:
+            if self._guard is None or context.main_exposures is None:
+                return None
+            mine = [x for e in self.demo_executors for x in self.exposures(e)]
+            decision = self._guard.check(
+                now,
+                equity=context.equity,
+                direction=plan.direction,
+                new_risk=context.equity * pct / 100.0,
+                exposures=[*context.main_exposures, *mine],
+                hedge_exposures=list(context.main_exposures) if hedge else None,
+            )
+            if decision.allowed:
+                return None
+            return decision.reasons[0] if decision.reasons else "the account guard"
+        equity = slot.paper.equity
+        value = self.spec.value_per_price_unit
+        held = sum(open_risk(p, value) for s in self.slots.values() for p in s.paper.open_positions)
+        ceiling = limits.max_open_risk_pct / 100.0 * equity
+        if held + equity * pct / 100.0 > ceiling + _EPSILON:
+            return (
+                f"open scalper risk would pass {limits.max_open_risk_pct:g}% of equity "
+                f"({held:.2f} already open)"
+            )
+        return None
+
+    def _today_rows(self, demo: bool, now: dt.datetime) -> list[TradeRow]:
+        boundary = self._config.strategy.liquidity.day_boundary
+        table = SCALP_LIVE_TABLE if demo else SCALP_PAPER_TABLE
+        today = trading_day_of(now, boundary)
+        rows = trades_between(self._db, table, now - dt.timedelta(days=2), now + MINUTE)
+        return [row for row in rows if trading_day_of(row.exit_time, boundary) == today]
+
+    def _budget(self, demo: bool, now: dt.datetime, executor: Executor) -> float:
+        """What the day's scalper loss limit still lets a new scalp risk, in %."""
+        limits = self._config.scalper.risk
+        today_net = sum(row.net_pnl for row in self._today_rows(demo, now))
+        value = self.spec.value_per_price_unit
+        account = [s.demo if demo else s.paper for s in self.slots.values()]
+        held = sum(open_risk(p, value) for e in account if e is not None for p in e.open_positions)
+        return budget_pct(limits.daily_loss_limit_pct, today_net, held, executor.equity)
+
+    def _risk_pct(
+        self, slot: ModeSlot, executor: Executor, demo: bool, now: dt.datetime
+    ) -> tuple[float, list[str]]:
+        """A new scalp's risk in % and why: the base, a martingale step (S10), never more
+        than the day's loss limit leaves."""
+        limits = self._config.scalper.risk
+        pct, notes = limits.risk_per_scalp_pct, []
+        if self.recovery_on(slot, executor):
+            ideas: dict[str, float] = {}
+            for row in sorted(self._today_rows(demo, now), key=lambda r: r.exit_time):
+                if mode_of(row.id) == slot.name:
+                    key = primary_of(row.id)
+                    ideas[key] = ideas.get(key, 0.0) + row.net_pnl
+            martingale = self._config.scalper.recovery.martingale
+            pct, step = martingale_risk(pct, list(ideas.values()), martingale)
+            if step:
+                notes.append(f"martingale step {step} after a loss")
+        budget = self._budget(demo, now, executor)
+        if budget < pct:
+            pct = max(0.0, budget)
+            notes.append("sized to what the daily loss limit leaves")
+        return pct, notes
 
     def _consider(
         self, slot: ModeSlot, candidate: Candidate, context: ScalpContext, now: dt.datetime
@@ -404,33 +707,64 @@ class ScalperRunner:
             return skip("the setup is stale")
         demo = context.on_demo(slot.name)
         executor = slot.target(demo)
+        recovery = self._config.scalper.recovery
+        recovery_on = self.recovery_on(slot, executor)
+        notes: list[str] = []
         if self.busy(executor):
-            return skip("a scalp of this mode is already open")
+            if not (slot.name == HFT and recovery_on and recovery.hft_stack.enabled):
+                return skip("a scalp of this mode is already open")
+            refusal = stack_refusal(
+                executor.open_positions,
+                len(executor.pending_orders),
+                candidate.direction,
+                recovery.hft_stack,
+            )
+            if refusal is not None:
+                return skip(refusal)
+            count = len(executor.open_positions) + 1
+            notes.append(f"stacked: HFT scalp {count} of {recovery.hft_stack.max_open}")
         gate = slot.logic.gate(candidate)
         if not gate.passed:
             log.info("scalp skipped", mode=slot.name, reason=gate.reason)
             return skip(gate.reason or "the mode's filters")
-        if slot.name == HFT and context.hft_setups is not None:
-            hft = self._config.scalper.hft
+        setups = context.setups_for(slot.name)
+        following: GradedSetup | None = None
+        if setups is not None:
+            grade, window = self._filter(slot.name)
             refusal = hft_permission(
                 candidate.direction,
-                context.hft_setups,
+                setups,
                 self.path,
                 now,
-                dt.timedelta(minutes=hft.a_window_min),
-                GRADE_NAMES.get(hft.grade_filter, "A or A+"),
+                window,
+                GRADE_NAMES.get(grade, "A or A+"),
+                LABELS.get(slot.name, slot.name),
             )
             if refusal is not None:
                 log.info("scalp skipped", mode=slot.name, reason=refusal)
                 return skip(refusal)
+            following = followed(candidate.direction, setups, self.path, now, window)
+            if following is not None:
+                notes.append(f"follows the {following.label} setup")
         stopped = slot.stopped_out.get(candidate.direction)
         cooldown = dt.timedelta(seconds=self._config.scalper.risk.cooldown_sec)
         if stopped is not None and candidate.time - stopped < cooldown:
             return skip("cooldown after a stop-out")
-        shared = self.shared_refusal(slot, candidate.direction, demo=demo, now=now)
+        shared = self.shared_refusal(
+            slot,
+            candidate.direction,
+            demo=demo,
+            now=now,
+            hedge=recovery_on and recovery.hedge_modes,
+        )
         if shared is not None:
             log.info("scalp skipped", mode=slot.name, reason=shared)
             return skip(shared)
+        pct, sizing = self._risk_pct(slot, executor, demo, now)
+        pct = round(pct, 4)  # what a plan carries
+        if pct <= 0:
+            return skip("the daily loss limit leaves no room for another scalp")
+        notes += sizing
         try:
             spread = float(self._broker.spread_points(self.spec.name))
         except BrokerError as exc:
@@ -446,20 +780,11 @@ class ScalperRunner:
         if made.plan is None:
             log.info("scalp skipped", mode=slot.name, reason=made.reason)
             return skip(made.reason)
-        plan = made.plan
-        if self._guard is not None and context.main_exposures is not None and demo:
-            risk = context.equity * self._config.scalper.risk.risk_per_scalp_pct / 100.0
-            mine = [x for e in self.demo_executors for x in self.exposures(e)]
-            decision = self._guard.check(
-                now,
-                equity=context.equity,
-                direction=plan.direction,
-                new_risk=risk,
-                exposures=[*context.main_exposures, *mine],
-            )
-            if not decision.allowed:
-                log.info("scalp refused by the account guard", reasons=list(decision.reasons))
-                return skip(decision.reasons[0] if decision.reasons else "the account guard")
+        plan = replace(made.plan, risk_pct=pct)
+        refused = self._guard_refusal(slot, plan, context, now, demo=demo)
+        if refused is not None:
+            log.info("scalp refused by the open-risk rules", reason=refused)
+            return skip(refused)
         event = executor.submit(
             plan, spread_points=spread, median_spread_points=median, events=context.events
         )
@@ -467,21 +792,32 @@ class ScalperRunner:
             log.info("scalp not placed", id=plan.id, detail=event.detail)
             return skip(event.detail or "not placed")
         self._count_id(plan.id)
+        if following is not None:
+            self.follows[plan.id] = following
+            self._save_follows()
         where = slot.where(executor)
-        log.info("scalp placed", id=plan.id, where=where, rule=candidate.rule)
+        log.info("scalp placed", id=plan.id, where=where, rule=candidate.rule, risk_pct=pct)
         slot.decision = Decision(
             candidate.time, side, f"placed {plan.id} ({where})", candidate.rule
         )
-        return messages.scalp_placed(plan, event, slot.name, where, candidate.reason)
+        reason = candidate.reason + (f"\n{'; '.join(notes)}" if notes else "")
+        return messages.scalp_placed(plan, event, slot.name, where, reason)
 
     def shared_refusal(
-        self, slot: ModeSlot, direction: Direction, *, demo: bool, now: dt.datetime
+        self,
+        slot: ModeSlot,
+        direction: Direction,
+        *,
+        demo: bool,
+        now: dt.datetime,
+        hedge: bool = False,
     ) -> str | None:
         """The rules all modes share in one account (S9, D115), or None when they pass.
 
         The account is the demo account (every mode's demo executor) or paper (every
-        mode's paper book). No hedging, no stacking unless risk-free, and one set of
-        daily limits for every mode together.
+        mode's paper book). No hedging (unless ``hedge``: the owner's capped hedging
+        between modes, S10), no stacking unless risk-free, and one set of daily limits
+        for every mode together.
         """
         for other in self.slots.values():
             if other is slot:
@@ -493,30 +829,38 @@ class ScalperRunner:
             for position in executor.open_positions:
                 way = Direction(position["direction"])
                 if way is not direction:
+                    if hedge:
+                        continue
                     return f"the {name} scalp is open the other way (no hedging)"
                 if not risk_free(position, way):
                     return f"the {name} scalp this way is not risk-free yet (no stacking)"
             for plan in executor.pending_orders:
                 if plan.direction is not direction:
+                    if hedge:
+                        continue
                     return f"the {name} scalp is waiting the other way (no hedging)"
                 return f"the {name} scalp this way is still waiting (no stacking)"
-        return self._shared_limits(demo, now)
+        target = slot.target(demo)
+        return self._shared_limits(demo, now, float(getattr(target, "equity", 0.0)))
 
-    def _shared_limits(self, demo: bool, now: dt.datetime) -> str | None:
-        """The scalper's daily limits counted over every mode in the account."""
+    def _shared_limits(self, demo: bool, now: dt.datetime, equity: float = 0.0) -> str | None:
+        """The scalper's daily limits counted over every mode in the account; a scalp
+        and its adds count as one (S10)."""
         limits = self._config.scalper.risk
         table = SCALP_LIVE_TABLE if demo else SCALP_PAPER_TABLE
-        rows = sorted(
-            trades_between(self._db, table, now - SHARED_LOOKBACK, now + MINUTE),
-            key=lambda row: row.exit_time,
-        )
+        rows = trades_between(self._db, table, now - SHARED_LOOKBACK, now + MINUTE)
+        ideas: dict[str, tuple[dt.datetime, float]] = {}
+        for row in rows:
+            key = primary_of(row.id)
+            last, net = ideas.get(key, (row.exit_time, 0.0))
+            ideas[key] = (max(last, row.exit_time), net + row.net_pnl)
         paused_until: dt.datetime | None = None
         in_a_row = 0
-        for row in rows:  # as the risk manager counts, over every mode together
-            if row.net_pnl < 0:
+        for exit_time, net in sorted(ideas.values()):  # as the risk manager counts
+            if net < 0:
                 in_a_row += 1
                 if in_a_row >= limits.max_consecutive_losses:
-                    paused_until, in_a_row = row.exit_time + PAUSE_AFTER_LOSSES, 0
+                    paused_until, in_a_row = exit_time + PAUSE_AFTER_LOSSES, 0
             else:
                 in_a_row = 0
         if paused_until is not None and now < paused_until:
@@ -527,13 +871,19 @@ class ScalperRunner:
         boundary = self._config.strategy.liquidity.day_boundary
         today = trading_day_of(now, boundary)
         day = [row for row in rows if trading_day_of(row.exit_time, boundary) == today]
-        limit_r = limits.daily_loss_limit_pct / limits.risk_per_scalp_pct
-        total_r = sum(row.r_multiple for row in day)
-        if total_r <= -limit_r + _EPSILON:
-            return f"the daily loss limit across the modes ({total_r:+.2f} R of -{limit_r:g} R)"
+        net_today = sum(row.net_pnl for row in day)
+        limit = limits.daily_loss_limit_pct / 100.0 * equity
+        if equity > 0 and net_today <= -limit + _EPSILON:
+            return (
+                f"the daily loss limit across the modes ({net_today:+.2f} of "
+                f"-{limit:.2f}, {limits.daily_loss_limit_pct:g}%)"
+            )
         executors = [s.demo if demo else s.paper for s in self.slots.values()]
-        opened = sum(len(e.open_positions) for e in executors if e is not None)
-        if len(day) + opened >= limits.max_scalps_per_day:
+        opened = sum(
+            1 for e in executors if e is not None for p in e.open_positions if not is_add(p["id"])
+        )
+        scalps = len({primary_of(row.id) for row in day})
+        if scalps + opened >= limits.max_scalps_per_day:
             return f"{limits.max_scalps_per_day} scalps today across the modes (the daily maximum)"
         return None
 

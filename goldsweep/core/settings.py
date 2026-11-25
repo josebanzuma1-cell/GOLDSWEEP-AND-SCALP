@@ -883,6 +883,10 @@ class IntradayConfig(_StrictModel):
     mode_ladder: tuple[float, ...] = (1.0, 2.0, 3.0)
     #: No intraday entry against the H1 trend (with it, or when it is flat).
     h1_filter: bool = True
+    #: Only in the direction of a live main-strategy setup of these grades, signalled in
+    #: the last ``setup_window_min`` minutes (S10, D116).
+    grade_filter: GradeFilter = "b"
+    setup_window_min: int = Field(default=240, ge=1, le=2880)
     #: A breakout close must clear the range by this much.
     breakout_buffer_atr: float = Field(default=0.1, ge=0, le=5)
     sl_buffer_atr: float = Field(default=0.1, ge=0, le=5)
@@ -989,6 +993,10 @@ class SwingScalpConfig(_StrictModel):
     sl_min_atr: float = Field(default=0.5, ge=0, le=20)
     sl_max_atr: float = Field(default=3.0, gt=0, le=50)
     ladder: tuple[float, ...] = (1.0, 2.0, 3.0)
+    #: Only in the direction of a live main-strategy setup of these grades, signalled in
+    #: the last ``setup_window_min`` minutes (S10, D116).
+    grade_filter: GradeFilter = "b"
+    setup_window_min: int = Field(default=480, ge=1, le=2880)
     #: Closed after this long at the latest, and this long before the weekly close.
     max_hold_hours: int = Field(default=48, ge=1, le=240)
     weekend_buffer_min: int = Field(default=60, ge=0, le=720)
@@ -1005,7 +1013,10 @@ class SwingScalpConfig(_StrictModel):
         return self
 
 
-HftGradeFilter = Literal["off", "a_plus", "a"]
+#: Which of the main strategy's setups a scalper mode follows (S9, S10): ``a_plus``
+#: (A+), ``a`` (A or A+), ``b`` (A+, A or B) or ``off`` (any direction).
+GradeFilter = Literal["off", "a_plus", "a", "b"]
+HftGradeFilter = GradeFilter
 
 
 class HftConfig(_StrictModel):
@@ -1041,6 +1052,62 @@ class HftConfig(_StrictModel):
         if abs(sum(value) - 1.0) > 1e-6:
             raise ValueError("scalper.hft.split must add up to 1")
         return value
+
+
+class MartingaleConfig(_StrictModel):
+    """After a losing scalp, the mode's next scalp risks more (S10, D116): the base times
+    ``multiplier`` per loss in a row, at most ``max_steps`` steps and ``max_risk_pct``;
+    back to the base after a win or at a new trading day."""
+
+    enabled: bool = False
+    multiplier: float = Field(default=2.0, ge=1.0, le=3.0)
+    max_steps: int = Field(default=1, ge=0, le=3)
+    max_risk_pct: float = Field(default=0.5, gt=0, le=1.0)
+
+
+class AverageDownConfig(_StrictModel):
+    """Grid and averaging down, one mechanism (S10, D116): while a scalp still has its
+    first stop, a bar closing ``add_at_r`` R against its entry adds a position with the
+    same stop, one take-profit at the scalp's TP1 and ``add_risk_pct`` of risk."""
+
+    enabled: bool = False
+    add_at_r: tuple[float, ...] = (0.4, 0.7)
+    add_risk_pct: float = Field(default=0.125, gt=0, le=0.5)
+
+    @field_validator("add_at_r")
+    @classmethod
+    def _levels_inside_the_stop(cls, value: tuple[float, ...]) -> tuple[float, ...]:
+        if not 1 <= len(value) <= 3 or list(value) != sorted(set(value)):
+            raise ValueError("scalper.recovery.average_down.add_at_r needs 1-3 rising levels")
+        if not all(0 < level < 1 for level in value):
+            raise ValueError("each add level must lie inside the first stop (0 < R < 1)")
+        return value
+
+
+class StackConfig(_StrictModel):
+    """HFT stacking (S10, D116): another HFT scalp beside open ones, only when every open
+    HFT position is risk-free and the setup it follows is live."""
+
+    enabled: bool = False
+    max_open: int = Field(default=3, ge=1, le=3)
+
+
+class RecoveryConfig(_StrictModel):
+    """The owner's capped recovery features for the scalper (S10, D116). Paper and demo
+    accounts only, never a real account; every order keeps its stop-loss and take-profit,
+    and the scalper's daily loss limit, pause and open-risk ceiling still apply."""
+
+    martingale: MartingaleConfig = MartingaleConfig()
+    average_down: AverageDownConfig = AverageDownConfig()
+    #: A scalp and its adds together never risk more than this share of equity.
+    max_idea_risk_pct: float = Field(default=0.5, gt=0, le=1.0)
+    hft_stack: StackConfig = StackConfig()
+    #: Scalper modes may hold opposite sides of each other (never the main strategy's).
+    hedge_modes: bool = False
+    #: Close a scalp when the setup it follows reaches its last target.
+    close_when_setup_done: bool = True
+    #: Positions (and waiting orders) one mode may hold at once.
+    max_open_per_mode: int = Field(default=3, ge=1, le=5)
 
 
 #: Each scalper mode's magic number is ``scalper.magic_number`` plus its offset (D112),
@@ -1095,6 +1162,7 @@ class ScalperConfig(_StrictModel):
     swing_scalp: SwingScalpConfig = SwingScalpConfig()
     h1_trend: H1TrendConfig = H1TrendConfig()
     hft: HftConfig = HftConfig()
+    recovery: RecoveryConfig = RecoveryConfig()
 
     def magic_for(self, mode: str) -> int:
         """The magic number of ``mode``'s orders (hft, intraday, swing)."""
@@ -1117,6 +1185,11 @@ class ScalperConfig(_StrictModel):
             raise ValueError("scalper.tp_step_r must not exceed scalper.tp_step_r_max")
         if self.hft.step_r > self.tp_step_r_max:
             raise ValueError("scalper.hft.step_r must not exceed scalper.tp_step_r_max")
+        recovery = self.recovery
+        if recovery.martingale.max_risk_pct > recovery.max_idea_risk_pct:
+            raise ValueError("martingale.max_risk_pct must not exceed max_idea_risk_pct")
+        if self.risk.risk_per_scalp_pct > recovery.max_idea_risk_pct:
+            raise ValueError("risk_per_scalp_pct must not exceed recovery.max_idea_risk_pct")
         if len(set(self.sessions)) != len(self.sessions):
             raise ValueError("scalper.sessions contains duplicates")
         return self

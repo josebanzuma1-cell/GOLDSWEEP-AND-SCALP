@@ -114,6 +114,10 @@ class InvalidPlan(ValueError):
     """A plan without a usable stop-loss and take-profit."""
 
 
+#: No plan may risk more than this share of equity (the risk settings' hard maximum).
+MAX_PLAN_RISK_PCT = 2.0
+
+
 @dataclass(frozen=True, slots=True)
 class TradePlan:
     """What the book needs from a signal to trade it."""
@@ -140,6 +144,9 @@ class TradePlan:
     #: The HFT burst's fourth and fifth targets (S9, D115); None everywhere else.
     take_profit_4: float | None = None
     take_profit_5: float | None = None
+    #: This plan's own risk in % of equity (the scalper's martingale step or an add,
+    #: S10, D116); None: the book's risk settings decide.
+    risk_pct: float | None = None
 
     def __post_init__(self) -> None:
         numbers = [self.entry, self.stop_loss, self.take_profit_1]
@@ -152,6 +159,8 @@ class TradePlan:
         for number, target in enumerate(self.targets, 1):
             if target is not None and (target - self.entry) * sign <= 0:
                 raise InvalidPlan(f"{self.id}: TP{number} is not on the winning side of the entry")
+        if self.risk_pct is not None and not 0 < self.risk_pct <= MAX_PLAN_RISK_PCT:
+            raise InvalidPlan(f"{self.id}: risk {self.risk_pct}% is outside 0-{MAX_PLAN_RISK_PCT}%")
 
     @property
     def targets(self) -> tuple[float | None, ...]:
@@ -265,6 +274,7 @@ class TradePlan:
             "close_by": self.close_by.isoformat() if self.close_by else None,
             "take_profit_4": self.take_profit_4,
             "take_profit_5": self.take_profit_5,
+            "risk_pct": self.risk_pct,
         }
 
     @classmethod
@@ -631,6 +641,7 @@ class ExitReason(StrEnum):
     TP3 = "tp3"
     TP4 = "tp4"  # the HFT burst's parts 4 and 5 (S9, D115)
     TP5 = "tp5"
+    SETUP_DONE = "setup_done"  # the setup a scalp followed reached its target (S10, D116)
     STOP = "stop"
     BREAKEVEN = "breakeven"
     TRAIL = "trail"
@@ -888,6 +899,13 @@ class TradeBook:
             for p in self._positions
         ]
 
+    def plan_of(self, plan_id: str) -> TradePlan | None:
+        """The plan of an open position or a waiting order, if this book holds it."""
+        for item in [*self._positions, *self._orders]:
+            if item.plan.id == plan_id:
+                return item.plan
+        return None
+
     def holds(self, plan_id: str) -> bool:
         return any(o.plan.id == plan_id for o in self._orders) or any(
             p.plan.id == plan_id for p in self._positions
@@ -922,7 +940,7 @@ class TradeBook:
                 Outcome.RISK_BLOCKED,
                 "; ".join(decision.reasons),
             )
-        size = manager.size(plan.entry, plan.stop_loss, self._spec)
+        size = manager.size(plan.entry, plan.stop_loss, self._spec, plan.risk_pct)
         if not size.ok:
             return BookEvent(
                 EventKind.REJECTED, plan.time, plan, payload, Outcome.NO_SIZE, size.reason or ""
@@ -1332,6 +1350,25 @@ class TradeBook:
         for order in list(self._orders):
             self._drop(order, events, EventKind.CANCELLED, order_outcome, detail, instant)
         for position in list(self._positions):
+            price = bid if position.long else ask
+            self._close_all(position, price, instant, reason, events)
+        return events
+
+    def close_plan(
+        self,
+        when: dt.datetime,
+        bid: float,
+        ask: float,
+        plan_id: str,
+        reason: ExitReason,
+        detail: str,
+    ) -> list[BookEvent]:
+        """Cancel ``plan_id``'s entry order or close its position at the given quote."""
+        events: list[BookEvent] = []
+        instant = ensure_utc(when)
+        for order in [o for o in self._orders if o.plan.id == plan_id]:
+            self._drop(order, events, EventKind.CANCELLED, Outcome.CANCELLED, detail, instant)
+        for position in [p for p in self._positions if p.plan.id == plan_id]:
             price = bid if position.long else ask
             self._close_all(position, price, instant, reason, events)
         return events

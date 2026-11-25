@@ -108,6 +108,7 @@ from goldsweep.scalping.modes import (
     ordered,
     parse_modes,
 )
+from goldsweep.scalping.recovery import recovery_line
 from goldsweep.scalping.runner import (
     Decision,
     ScalpContext,
@@ -585,21 +586,36 @@ class Trader:
             equity=self.executor.equity if demo else 0.0,
             modes=built,
             demo_modes=demo_modes,
-            hft_setups=self._hft_setups(now) if "hft" in built else None,
+            setups={mode: self._mode_setups(mode, now) for mode in built},
         )
 
-    def _hft_setups(self, now: dt.datetime) -> list[GradedSetup] | None:
-        """The main strategy's A/A+ setups HFT may follow (S9, D115); None: no filter.
+    def _mode_setups(self, mode: str, now: dt.datetime) -> list[GradedSetup] | None:
+        """The graded setups ``mode`` follows (S9, S10); None: its filter is off."""
+        scalper = self._config.scalper
+        if mode == "hft":
+            return self._hft_setups(now)
+        settings = scalper.intraday if mode == "intraday" else scalper.swing_scalp
+        return self._graded_setups(now, settings.grade_filter, settings.setup_window_min)
 
-        Signals graded A or A+ (``scalper.hft.grade_filter``) in the last
-        ``a_window_min`` minutes, with their last target, the sweep's extreme and
-        whether their trade has closed (the runner judges which are still live), plus
-        the setups forming now that can still become an A+ ("A+ possible").
-        """
+    def _hft_setups(self, now: dt.datetime) -> list[GradedSetup] | None:
+        """The main strategy's A/A+ setups HFT may follow (S9, D115); None: no filter."""
         hft = self._config.scalper.hft
-        if hft.grade_filter == "off":
+        return self._graded_setups(now, hft.grade_filter, hft.a_window_min)
+
+    def _graded_setups(
+        self, now: dt.datetime, grade_filter: str, window_min: int
+    ) -> list[GradedSetup] | None:
+        """The main strategy's setups of the given grades (S9, D115; S10, D116).
+
+        Signals graded as ``grade_filter`` allows (``a``: A or A+, ``a_plus``: A+,
+        ``b``: A+, A or B) in the last ``window_min`` minutes, with their last target,
+        the sweep's extreme and whether their trade has closed (the runner judges which
+        are still live), plus the setups forming now that can still become an A+ ("A+
+        possible"). None when the filter is off.
+        """
+        if grade_filter == "off":
             return None
-        since = now - dt.timedelta(minutes=hft.a_window_min)
+        since = now - dt.timedelta(minutes=window_min)
         rows = self._db.query(
             "SELECT id, time, direction, stop_loss, take_profit_1, take_profit_2, detail "
             "FROM signals WHERE time >= ? ORDER BY time",
@@ -611,7 +627,7 @@ class Trader:
         for signal_id, epoch, direction, stop, tp1, tp2, detail_text in rows:
             detail = json.loads(detail_text or "{}")
             grade_text = detail.get("grade")
-            if not accepts(grade_text, hft.grade_filter):
+            if not accepts(grade_text, grade_filter):
                 continue
             last = detail.get("take_profit_3") or tp2 or tp1
             sweep = detail.get("sweep_x")
@@ -620,7 +636,7 @@ class Trader:
                     id=signal_id,
                     time=dt.datetime.fromtimestamp(int(epoch), tz=dt.UTC),
                     direction=Direction(direction),
-                    grade="A+" if str(grade_text).startswith("A+") else "A",
+                    grade=str(grade_text).split(" ")[0],  # A+, A or B
                     target=float(last) if last is not None else None,
                     invalid=float(sweep if sweep is not None else stop),
                     closed=signal_id in closed,
@@ -838,6 +854,14 @@ class Trader:
         count, total = self.scalper.today(now)
         if count:
             lines.append(f"Scalps closed in the last 24 h: {count}, {total:+.2f} R")
+        recovery = self._config.scalper.recovery
+        if self.scalper_modes and (
+            recovery.martingale.enabled
+            or recovery.average_down.enabled
+            or recovery.hft_stack.enabled
+            or recovery.hedge_modes
+        ):
+            lines.append(recovery_line(recovery))
         return lines
 
     def _scalper_picture(self, now: dt.datetime) -> dict[str, Any]:

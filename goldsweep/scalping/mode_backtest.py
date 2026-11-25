@@ -10,6 +10,12 @@ that bar meet the runner's gates (one scalp at a time, the mode's own filters, t
 cooldown after a stop-out, the stop and cost gate, the book's risk checks). The run is
 made with costs and again without them.
 
+The owner's capped recovery features (S10, D116: martingale sizing, grid / averaging-down
+adds, HFT stacking; :mod:`~goldsweep.scalping.recovery`) are replayed with the same
+functions the runner uses, and the run with costs is repeated without them for
+comparison. What cannot be replayed: the grade filters and the close when a setup is done
+(the main strategy's signals are not replayed), and hedging between modes (one mode runs).
+
 The owner judges every mode on paper and on the demo account (D111); this report is
 what those results are compared with. Its limits: no historical calendar (no news
 blackout), bid bars only with the worse case assumed inside a bar, market entries at
@@ -26,25 +32,38 @@ import json
 import sys
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TextIO
 
 import numpy as np
 import pandas as pd
 
+from goldsweep.analysis.periods import trading_day_of
 from goldsweep.analysis.structure import Direction
 from goldsweep.backtest.data import load_symbol_spec
 from goldsweep.backtest.engine import rolling_median, spread_points
 from goldsweep.backtest.metrics import Metrics, breakdown, summarize
 from goldsweep.core.clock import SessionCalculator, ensure_utc
-from goldsweep.core.settings import Settings, load_settings
+from goldsweep.core.settings import DayBoundaryConfig, Settings, load_settings
 from goldsweep.core.types import Timeframe
 from goldsweep.data.broker import SymbolSpec
 from goldsweep.execution.book import Bar, EventKind, ExitReason, Trade, TradeBook, to_ns
 from goldsweep.scalping.backtest import DISCLAIMER, _nanoseconds
-from goldsweep.scalping.logic import LOGICS, Candidate, make_logic
+from goldsweep.scalping.logic import HFT, LOGICS, Candidate, make_logic
 from goldsweep.scalping.plan import LadderCosts, scalp_risk
+from goldsweep.scalping.recovery import (
+    OpenScalp,
+    add_due,
+    add_plan,
+    budget_pct,
+    idea_room,
+    is_add,
+    martingale_risk,
+    open_risk,
+    primary_of,
+    stack_refusal,
+)
 from goldsweep.storage.db import Database
 
 LIMITATIONS = (
@@ -52,6 +71,8 @@ LIMITATIONS = (
     "Bid bars only: inside a one-minute bar the worse case is assumed.",
     "Market entries fill at the next bar's open plus slippage.",
     "No account guard: the main strategy is not replayed beside the scalper.",
+    "No grade filter and no close when a setup is done: the main strategy's signals are "
+    "not replayed (S10).",
 )
 
 
@@ -64,10 +85,43 @@ class ModeRun:
     rejections: Counter[str]
     metrics: Metrics
     days: int
+    recovery: bool = False
 
     @property
     def per_day(self) -> float:
         return len(self.trades) / self.days if self.days else 0.0
+
+    def worst_day(self, balance: float, boundary: DayBoundaryConfig) -> tuple[str, float]:
+        """The worst trading day (17:00 New York, as the daily loss limit counts) by closed
+        trades, in % of the starting balance."""
+        days: dict[str, float] = {}
+        for trade in self.trades:
+            key = f"{trading_day_of(trade.exit_time, boundary):%Y-%m-%d}"
+            days[key] = days.get(key, 0.0) + trade.net_pnl
+        if not days or balance <= 0:
+            return "-", 0.0
+        key = min(days, key=lambda k: days[k])
+        return key, days[key] / balance * 100.0
+
+
+def without_recovery(settings: Settings) -> Settings:
+    """``settings`` with the owner's recovery features off (the comparison run)."""
+    scalper = settings.config.scalper
+    recovery = scalper.recovery
+    off = recovery.model_copy(
+        update={
+            "martingale": recovery.martingale.model_copy(update={"enabled": False}),
+            "average_down": recovery.average_down.model_copy(update={"enabled": False}),
+            "hft_stack": recovery.hft_stack.model_copy(update={"enabled": False}),
+            "hedge_modes": False,
+        }
+    )
+    config = settings.config.model_copy(
+        update={"scalper": scalper.model_copy(update={"recovery": off})}
+    )
+    from dataclasses import replace as replace_settings
+
+    return replace_settings(settings, config=config)
 
 
 def simulate(
@@ -82,6 +136,17 @@ def simulate(
 ) -> ModeRun:
     """Replay ``m1`` through ``mode`` as the runner would; trades opened in [start, end)."""
     config = settings.config
+    recovery = config.scalper.recovery
+    recovering = (
+        recovery.martingale.enabled or recovery.average_down.enabled or recovery.hft_stack.enabled
+    )
+    limits = config.scalper.risk
+    boundary = config.strategy.liquidity.day_boundary
+    value = spec.value_per_price_unit
+    adds: dict[str, list[float]] = {}
+    ideas_today: dict[str, float] = {}
+    today: dt.date | None = None
+    day_net = 0.0
     costs_cfg = config.backtest.costs
     if not costs:
         costs_cfg = costs_cfg.model_copy(update={"slippage_points": 0.0, "commission_per_lot": 0.0})
@@ -123,6 +188,9 @@ def simulate(
         opened = ensure_utc(times[i])
         o, h, low, c = float(opens[i]), float(highs[i]), float(lows[i]), float(closes[i])
         candidates: list[Candidate] = logic.on_bar(opened, o, h, low, c, float(volumes[i]))
+        day = trading_day_of(opened, boundary)
+        if day != today:
+            today, day_net, ideas_today = day, 0.0, {}
         if not book.idle:
             bar = Bar(
                 int(open_ns[i]), int(open_ns[i]) + 60 * 10**9, o, h, low, c, float(spreads[i])
@@ -130,14 +198,66 @@ def simulate(
             for event in book.on_bar(bar, line=line):
                 if event.kind is EventKind.CLOSED and event.trade is not None:
                     trades.append(event.trade)
+                    plan_id = event.trade.plan.id
+                    day_net += event.trade.net_pnl
+                    key = primary_of(plan_id)
+                    ideas_today[key] = ideas_today.get(key, 0.0) + event.trade.net_pnl
+                    if not is_add(plan_id):
+                        adds.pop(plan_id, None)
                     if event.trade.exit_reason is ExitReason.STOP:
                         stopped[event.trade.direction] = event.trade.exit_time
+        if recovery.average_down.enabled and not book.idle and start_ns <= open_ns[i] < end_ns:
+            for position in list(book.positions):
+                primary = str(position["id"])
+                plan = None if is_add(primary) else book.plan_of(primary)
+                if plan is None:
+                    continue
+                scalp = OpenScalp(plan, float(position["fill_price"]), float(position["stop"]))
+                done = adds.get(primary, [])
+                if not add_due(scalp, c, len(done), recovery.average_down):
+                    continue
+                pct = recovery.average_down.add_risk_pct
+                base = plan.risk_pct or limits.risk_per_scalp_pct
+                held = sum(open_risk(p, value) for p in book.positions)
+                budget = budget_pct(limits.daily_loss_limit_pct, day_net, held, book.manager.equity)
+                if pct > idea_room(base, done, recovery.max_idea_risk_pct) or pct > budget:
+                    outcomes["add skipped (caps)"] += 1
+                    continue
+                add = add_plan(
+                    scalp,
+                    len(done) + 1,
+                    close=c,
+                    time=opened + dt.timedelta(minutes=1),
+                    expires_at=opened + dt.timedelta(minutes=2),
+                    risk_pct=pct,
+                    level_r=recovery.average_down.add_at_r[len(done)],
+                )
+                if add is None:
+                    continue
+                placed = book.submit(
+                    add,
+                    None,
+                    spread_points=float(points[i]) if costs else 0.0,
+                    median_spread_points=float(median[i]) if costs else None,
+                )
+                if placed.kind is EventKind.PLACED:
+                    adds[primary] = [*done, add.risk_pct or pct]
+                    outcomes["add"] += 1
         for candidate in candidates:
             if not start_ns <= to_ns(candidate.time) < end_ns:
                 continue
+            stacked = False
             if not book.idle:
-                outcomes["busy"] += 1
-                continue
+                if not (logic.name == HFT and recovery.hft_stack.enabled):
+                    outcomes["busy"] += 1
+                    continue
+                refusal = stack_refusal(
+                    book.positions, len(book.orders), candidate.direction, recovery.hft_stack
+                )
+                if refusal is not None:
+                    outcomes["busy"] += 1
+                    continue
+                stacked = True
             gate = logic.gate(candidate)
             if not gate.passed:
                 outcomes[gate.reason or "gate"] += 1
@@ -159,15 +279,30 @@ def simulate(
                 outcomes["no_plan"] += 1
                 rejections[made.reason.split(" (")[0]] += 1
                 continue
+            pct, step = martingale_risk(
+                limits.risk_per_scalp_pct, list(ideas_today.values()), recovery.martingale
+            )
+            held = sum(open_risk(p, value) for p in book.positions)
+            equity = book.manager.equity
+            pct = min(pct, budget_pct(limits.daily_loss_limit_pct, day_net, held, equity))
+            pct = round(pct, 4)  # what a plan carries
+            if pct <= 0:
+                outcomes["daily budget"] += 1
+                continue
+            if held + equity * pct / 100.0 > limits.max_open_risk_pct / 100.0 * equity + 1e-9:
+                outcomes["open risk ceiling"] += 1
+                continue
             event = book.submit(
-                made.plan,
+                replace(made.plan, risk_pct=pct),
                 candidate,
                 spread_points=float(points[i]) if costs else 0.0,
                 median_spread_points=float(median[i]) if costs else None,
             )
             if event.kind is EventKind.PLACED:
                 outcomes["traded"] += 1
-                break  # one scalp at a time
+                outcomes["stacked"] += int(stacked)
+                outcomes["martingale step"] += int(step > 0)
+                break  # one new scalp a bar
             outcomes[event.outcome.value if event.outcome else "rejected"] += 1
     if not book.idle:
         last_bar = len(m1) - 1
@@ -183,7 +318,9 @@ def simulate(
                 trades.append(event.trade)
     in_period = m1.index[(m1.index >= pd.Timestamp(start)) & (m1.index < pd.Timestamp(end))]
     days = len(set(in_period.date))
-    return ModeRun(mode, costs, trades, outcomes, rejections, summarize(trades, balance), days)
+    return ModeRun(
+        mode, costs, trades, outcomes, rejections, summarize(trades, balance), days, recovering
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -203,6 +340,8 @@ def _metrics_json(m: Metrics) -> dict[str, object]:
 
 
 def _rule(trade: Trade) -> str:
+    if is_add(trade.plan.id):
+        return "add (grid / averaging down)"
     return str(getattr(trade.payload, "rule", "?"))
 
 
@@ -264,7 +403,10 @@ def write_report(
     start: dt.datetime,
     end: dt.datetime,
     balance: float,
+    plain: ModeRun | None = None,
+    boundary: DayBoundaryConfig | None = None,
 ) -> Path:
+    boundary = boundary or DayBoundaryConfig()
     folder.mkdir(parents=True, exist_ok=True)
     first, last = halves(net, start, end, balance)
     summary = {
@@ -276,6 +418,9 @@ def write_report(
         "per_day": round(net.per_day, 4),
         "first_two_thirds": _metrics_json(first),
         "last_third": _metrics_json(last),
+        "recovery": net.recovery,
+        "worst_day": dict(zip(("date", "pct"), net.worst_day(balance, boundary), strict=True)),
+        "without_recovery": _metrics_json(plain.metrics) if plain is not None else None,
         "outcomes": dict(sorted(net.outcomes.items())),
         "no_plan": dict(sorted(net.rejections.items())),
         "breakdowns": breakdowns(net, balance),
@@ -327,9 +472,14 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
     parser.add_argument("--to", dest="end", type=_day, required=True)
     parser.add_argument("--config", type=Path)
     parser.add_argument("--out", type=Path)
+    parser.add_argument(
+        "--no-recovery", action="store_true", help="the owner's recovery features off (D116)"
+    )
     arguments = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(arguments)
     settings = load_settings(config_path=args.config)
+    if args.no_recovery:
+        settings = without_recovery(settings)
     config = settings.config
     start = dt.datetime.combine(args.start, dt.time(0), tzinfo=dt.UTC)
     end = dt.datetime.combine(args.end + dt.timedelta(days=1), dt.time(0), tzinfo=dt.UTC)
@@ -350,6 +500,11 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
     )
     net = simulate(settings, m1, spec, args.mode, start, end, costs=True)
     gross = simulate(settings, m1, spec, args.mode, start, end, costs=False)
+    plain = (
+        simulate(without_recovery(settings), m1, spec, args.mode, start, end, costs=True)
+        if net.recovery
+        else None
+    )
     period = (f"{args.start:%Y-%m-%d}", f"{args.end:%Y-%m-%d}")
     folder = args.out or settings.config_path.parent / "reports" / (
         f"scalper_{args.mode}_{period[0]}_{period[1]}"
@@ -357,13 +512,32 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
     command = "python -m goldsweep.scalping.mode_backtest " + " ".join(arguments)
     balance = config.backtest.initial_balance
     path = write_report(
-        folder, net, gross, command=command, period=period, start=start, end=end, balance=balance
+        folder,
+        net,
+        gross,
+        command=command,
+        period=period,
+        start=start,
+        end=end,
+        balance=balance,
+        plain=plain,
+        boundary=config.strategy.liquidity.day_boundary,
     )
     first, last = halves(net, start, end, balance)
     print(f"GoldSweep scalper {args.mode} mode {spec.name} {period[0]} .. {period[1]}", file=out)
     print(HEADER, file=out)
     print(line("with costs", net), file=out)
     print(line("without costs", gross), file=out)
+    if plain is not None:
+        print(line("with costs, no recovery", plain), file=out)
+    worst, pct = net.worst_day(balance, config.strategy.liquidity.day_boundary)
+    print(f"Worst trading day: {pct:+.2f}% of the balance ({worst})", file=out)
+    if net.recovery:
+        print(
+            "Recovery features on (D116): martingale, grid / averaging-down adds, HFT stacking "
+            "as config.yaml says; they do not change the edge, only how wins and losses fall.",
+            file=out,
+        )
     print(
         f"First two-thirds {first.trades} trades {_r(first.expectancy_r)} R; last third "
         f"{last.trades} trades {_r(last.expectancy_r)} R",

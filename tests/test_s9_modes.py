@@ -370,6 +370,7 @@ class StubBook:
     ) -> None:
         self.open_positions = positions or []
         self.pending_orders = orders or []
+        self.equity = 10_000.0
 
 
 def position(direction: Direction, fill: float, stop: float) -> dict[str, Any]:
@@ -450,8 +451,9 @@ def test_the_daily_loss_and_count_across_modes(settings: Settings, db: Database)
     hft = r.slots["hft"]
     for n, result in enumerate((-2.0, 0.5, -2.6)):
         store(db, SCALP_LIVE_TABLE, f"2026-11-17-SWS-00{n}", T0 - WINDOW + n * MINUTE, result)
+    # In money since S10 (martingale makes R uneven): 1% of 10,000.
     assert r.shared_refusal(hft, Direction.LONG, demo=True, now=T0) == (
-        "the daily loss limit across the modes (-4.10 R of -4 R)"
+        "the daily loss limit across the modes (-102.50 of -100.00, 1%)"
     )
     db.execute("DELETE FROM scalp_live_trades")
     for n in range(8):

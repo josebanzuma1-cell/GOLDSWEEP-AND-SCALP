@@ -365,8 +365,8 @@ def test_an_intraday_scalp_on_paper_is_flat_by_its_time(settings: Settings, db: 
     placed, closed = h.notes.sent
     # The stop 0.1 ATR beyond the anchor; targets 1, 2 and 3 R away (D112).
     assert placed == (
-        "⚡ Scalp INTRADAY LONG 2026-11-17-INT-001 (paper, 0.13 lots): market | SL 2028.10 | "
-        "TP 2031.90 / 2033.80 / 2035.70\nM5: test sweep"
+        "⚡ Scalp INTRADAY LONG 2026-11-17-INT-001 (paper, 0.13 lots, 0.25% risk): market | "
+        "SL 2028.10 | TP 2031.90 / 2033.80 / 2035.70\nM5: test sweep"
     )
     # TP1 on the rise; the rest closed at its flat-by time.
     assert closed.startswith(
@@ -387,7 +387,9 @@ def test_a_swing_scalp_on_paper(settings: Settings, db: Database) -> None:
     h.say("scalper", "swing")
     h.run_until(utc(2026, 11, 17, 8, 10))
     (placed,) = h.notes.sent
-    assert placed.startswith("⚡ Scalp SWING LONG 2026-11-17-SWS-001 (paper, 0.07 lots): market")
+    assert placed.startswith(
+        "⚡ Scalp SWING LONG 2026-11-17-SWS-001 (paper, 0.07 lots, 0.25% risk): market"
+    )
     assert "SL 2026.80 | TP 2033.20 / 2036.40 / 2039.60" in placed
     (position,) = h.trader.scalper.slots[SWING].paper.open_positions
     assert position["id"] == "2026-11-17-SWS-001"
@@ -444,7 +446,13 @@ def test_the_mode_backtest_replays_the_live_logic(settings: Settings, mode: str)
     run = mode_backtest.simulate(settings, WEEK, spec, mode, start, end)
     again = mode_backtest.simulate(settings, WEEK, spec, mode, start, end)
     assert [t.net_pnl for t in run.trades] == [t.net_pnl for t in again.trades]  # repeatable
-    assert run.outcomes["traded"] == len(run.trades)  # every trade finished (end of data)
+    # Every trade finished (end of data); grid / averaging-down adds are trades too (S10).
+    assert run.outcomes["traded"] + run.outcomes["add"] == len(run.trades)
+    plain = mode_backtest.simulate(
+        mode_backtest.without_recovery(settings), WEEK, spec, mode, start, end
+    )
+    assert plain.outcomes["traded"] == len(plain.trades) and not plain.recovery
+    assert plain.outcomes["add"] == plain.outcomes["stacked"] == 0
     assert all(start <= t.plan.time < end for t in run.trades)
     assert all(
         t.plan.id.startswith(

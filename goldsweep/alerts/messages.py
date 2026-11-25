@@ -259,6 +259,8 @@ def scalp_placed(plan: TradePlan, event: BookEvent, mode: str, where: str, reaso
     """A scalp sent (quiet messages, D97: this one and the close)."""
     targets = " / ".join(f"{t:.2f}" for t in plan.targets if t is not None)
     lots = f", {event.lots:g} lots" if event.lots else ""
+    if plan.risk_pct is not None:
+        lots += f", {plan.risk_pct:.3g}% risk"
     place = _SCALP_WHERE.get(where, where)
     return (
         f"⚡ Scalp {mode.upper()} {plan.direction.value} {plan.id} ({place}{lots}): "
