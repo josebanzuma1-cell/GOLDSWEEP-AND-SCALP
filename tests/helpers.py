@@ -44,6 +44,27 @@ def without_grade_filter(settings: Settings) -> Settings:
     )
 
 
+def with_recovery(settings: Settings) -> Settings:
+    """``settings`` with the owner's capped recovery features on, at D116's caps (the
+    shipped config has them off since the owner's approval of S10)."""
+    scalper = settings.config.scalper
+    recovery = scalper.recovery
+    on = recovery.model_copy(
+        update={
+            "martingale": recovery.martingale.model_copy(update={"enabled": True}),
+            "average_down": recovery.average_down.model_copy(update={"enabled": True}),
+            "hft_stack": recovery.hft_stack.model_copy(update={"enabled": True}),
+            "hedge_modes": True,
+        }
+    )
+    return dataclasses.replace(
+        settings,
+        config=settings.config.model_copy(
+            update={"scalper": scalper.model_copy(update={"recovery": on})}
+        ),
+    )
+
+
 def utc(
     year: int, month: int, day: int, hour: int = 0, minute: int = 0, second: int = 0
 ) -> dt.datetime:

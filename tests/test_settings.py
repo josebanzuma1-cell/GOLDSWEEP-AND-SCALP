@@ -160,10 +160,9 @@ def test_built_in_defaults_equal_the_shipped_config(settings: Settings, tmp_path
     """An empty config file must behave exactly like the shipped one (apart from the
     owner's mode switch, which an empty file leaves at PAPER, and the owner's
     recorded changes, which an empty file leaves at the spec's values)."""
-    from goldsweep.core.settings import PlaybooksConfig, RecoveryConfig
+    from goldsweep.core.settings import PlaybooksConfig
 
-    scalper = settings.config.scalper
-    assert scalper.recovery.martingale.enabled and settings.config.execution.max_total_lots == 2.0
+    assert settings.config.execution.max_total_lots == 2.0
     spec_values = {key: spec for key, (spec, _) in OWNER_CHANGES.items()}
     spec_risk = {key: spec for key, (spec, _) in OWNER_RISK_CHANGES.items()}
     windows = settings.config.sessions
@@ -191,9 +190,7 @@ def test_built_in_defaults_equal_the_shipped_config(settings: Settings, tmp_path
             "backtest": backtest.model_copy(
                 update={"costs": backtest.costs.model_copy(update={"commission_per_lot": 7.0})}
             ),
-            # D116: the owner switched the scalper's capped recovery features on and
-            # raised the lot cap to 2; the built-in defaults keep them off and at 1.
-            "scalper": scalper.model_copy(update={"recovery": RecoveryConfig()}),
+            # D116: the owner raised the lot cap to 2; the built-in default stays 1.
             "execution": settings.config.execution.model_copy(update={"max_total_lots": 1.0}),
         }
     )

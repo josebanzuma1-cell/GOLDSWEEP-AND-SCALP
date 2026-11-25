@@ -19,7 +19,7 @@ from goldsweep.data.mock_broker import default_gold_spec
 from goldsweep.execution.book import ExitReason, TradePlan, plan_legs
 from goldsweep.scalping.engine import SWEEP_RECLAIM, ScalpSetup
 from goldsweep.scalping.plan import LadderCosts, ladder, scalp_management, scalp_plan, scalp_risk
-from tests.helpers import utc
+from tests.helpers import utc, with_recovery
 
 MINUTE = dt.timedelta(minutes=1)
 FREE = LadderCosts(0.0, 0.0, 0.0)
@@ -154,13 +154,15 @@ def test_three_children_forty_thirty_thirty() -> None:
 
 def test_the_scalper_risk_settings_and_management(settings: Settings) -> None:
     risk = scalp_risk(settings.config)
-    # A scalp's parts are one position; its adds and stacked HFT scalps are more (S10):
-    # three a mode, and the per-mode counts leave room for two adds a scalp.
+    # A scalp's parts are one position; adds and stacked HFT scalps would be more (S10):
+    # three a mode. With averaging down off (as shipped, D116) a day stays at 8 scalps;
+    # switched on, the per-mode count leaves room for two adds a scalp.
     assert (risk.risk_per_trade_pct, risk.max_open_positions, risk.max_trades_per_day) == (
         0.25,
         3,
-        24,
+        8,
     )
+    assert scalp_risk(with_recovery(settings).config).max_trades_per_day == 24
     assert (risk.daily_loss_limit_pct, risk.max_spread_multiple, risk.breakeven_at_r) == (
         1.0,
         1.5,

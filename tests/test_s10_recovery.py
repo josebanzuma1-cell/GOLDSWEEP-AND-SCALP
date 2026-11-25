@@ -45,7 +45,7 @@ from goldsweep.scalping.recovery import (
 )
 from goldsweep.scalping.runner import ModeSlot
 from goldsweep.storage.db import Database
-from tests.helpers import bars, only_spec_model, quiet, utc, without_grade_filter
+from tests.helpers import bars, only_spec_model, quiet, utc, with_recovery, without_grade_filter
 from tests.test_s9_modes import T0, StubBook, position, runner, signal_row, store
 from tests.test_scalp_book import T0 as BOOK_T0
 from tests.test_scalp_book import bar, book
@@ -62,13 +62,19 @@ def db(tmp_path: Path) -> Any:
 
 
 @pytest.fixture
-def unfiltered(settings: Settings) -> Settings:
-    return without_grade_filter(only_spec_model(settings))
+def recovering(settings: Settings) -> Settings:
+    """The recovery features on, at D116's caps (the shipped config has them off)."""
+    return with_recovery(settings)
 
 
 @pytest.fixture
-def filtered(settings: Settings) -> Settings:
-    return only_spec_model(settings)
+def unfiltered(recovering: Settings) -> Settings:
+    return without_grade_filter(only_spec_model(recovering))
+
+
+@pytest.fixture
+def filtered(recovering: Settings) -> Settings:
+    return only_spec_model(recovering)
 
 
 # --------------------------------------------------------------------------- #
@@ -77,19 +83,22 @@ def filtered(settings: Settings) -> Settings:
 
 
 def test_the_recovery_settings(settings: Settings) -> None:
+    # Shipped OFF: the owner approved S10 with the recovery features off (D116); the caps
+    # are kept for when one is switched on.
     recovery = settings.config.scalper.recovery
     assert recovery.martingale == MartingaleConfig(
-        enabled=True, multiplier=2.0, max_steps=1, max_risk_pct=0.5
+        enabled=False, multiplier=2.0, max_steps=1, max_risk_pct=0.5
     )
     assert recovery.average_down == AverageDownConfig(
-        enabled=True, add_at_r=(0.4, 0.7), add_risk_pct=0.125
+        enabled=False, add_at_r=(0.4, 0.7), add_risk_pct=0.125
     )
-    assert recovery.hft_stack == StackConfig(enabled=True, max_open=3)
+    assert recovery.hft_stack == StackConfig(enabled=False, max_open=3)
     assert (recovery.max_idea_risk_pct, recovery.hedge_modes, recovery.max_open_per_mode) == (
         0.5,
-        True,
+        False,
         3,
     )
+    assert recovery.close_when_setup_done  # the setup-done close stays on
     assert settings.config.execution.max_total_lots == 2.0
     scalper = settings.config.scalper
     assert (scalper.intraday.grade_filter, scalper.intraday.setup_window_min) == ("b", 240)
@@ -316,8 +325,8 @@ def test_a_scalp_and_its_adds_count_as_one(settings: Settings, db: Database) -> 
     assert refusal is not None and refusal.startswith("3 losses in a row across the modes")
 
 
-def test_martingale_and_the_daily_budget_size_a_scalp(settings: Settings, db: Database) -> None:
-    r = runner(settings, db, hft=StubBook(), swing=StubBook())
+def test_martingale_and_the_daily_budget_size_a_scalp(recovering: Settings, db: Database) -> None:
+    r = runner(recovering, db, hft=StubBook(), swing=StubBook())
     hft = r.slots["hft"]
     assert r._risk_pct(hft, hft.paper, False, T0) == (0.25, [])  # noqa: SLF001
     store(db, SCALP_PAPER_TABLE, "2026-11-17-HFT-001", T0 - 30 * MINUTE, -1.0)  # -25.00
@@ -332,7 +341,17 @@ def test_martingale_and_the_daily_budget_size_a_scalp(settings: Settings, db: Da
     assert notes == ["martingale step 1 after a loss", "sized to what the daily loss limit leaves"]
 
 
-def test_no_recovery_feature_on_a_real_account(settings: Settings, db: Database) -> None:
+def test_as_shipped_a_loss_takes_no_martingale_step(settings: Settings, db: Database) -> None:
+    r = runner(settings, db, hft=StubBook())
+    store(db, SCALP_PAPER_TABLE, "2026-11-17-HFT-001", T0 - 30 * MINUTE, -1.0)
+    assert r._risk_pct(r.slots["hft"], r.slots["hft"].paper, False, T0) == (  # noqa: SLF001
+        0.25,
+        [],
+    )
+
+
+def test_no_recovery_feature_on_a_real_account(recovering: Settings, db: Database) -> None:
+    settings = recovering
     real = StubBook()
     real.demo = False  # type: ignore[attr-defined]
     on_demo = StubBook()

@@ -424,17 +424,18 @@ scalper:
                                  # and only until it reaches its target, is stopped or closed
   # The owner's capped recovery features (S10, D116), scalper only, paper and demo
   # accounts only (never a real account). They do not turn a losing edge into a winning
-  # one; they change how losses fall. Every order keeps its stop-loss and take-profit;
-  # the 1% daily loss, the 3-losses pause and the 0.75% open-risk ceiling still apply.
-  # The built-in defaults have them off.
+  # one: in the backtest they roughly doubled every mode's loss and drawdown, so the
+  # owner approved S10 with them OFF (2026-11-25). Each turns on with "enabled: true";
+  # every order keeps its stop-loss and take-profit, and the 1% daily loss, the
+  # 3-losses pause and the 0.75% open-risk ceiling still apply.
   recovery:
-    martingale: {enabled: true, multiplier: 2.0, max_steps: 1, max_risk_pct: 0.5}
+    martingale: {enabled: false, multiplier: 2.0, max_steps: 1, max_risk_pct: 0.5}
     #   after a losing scalp the mode's next one risks 0.5%, back to 0.25% after a win
-    average_down: {enabled: true, add_at_r: [0.4, 0.7], add_risk_pct: 0.125}
+    average_down: {enabled: false, add_at_r: [0.4, 0.7], add_risk_pct: 0.125}
     #   grid / averaging down: adds at 0.4 R and 0.7 R against, same stop, TP at TP1
     max_idea_risk_pct: 0.5       # a scalp and its adds together
-    hft_stack: {enabled: true, max_open: 3}   # only while every open HFT scalp is risk-free
-    hedge_modes: true            # modes may hold opposite sides; never against the main strategy
+    hft_stack: {enabled: false, max_open: 3}   # only while every open HFT scalp is risk-free
+    hedge_modes: false           # modes may hold opposite sides; never against the main strategy
     close_when_setup_done: true  # close a scalp when its setup reaches its last target
     max_open_per_mode: 3
 

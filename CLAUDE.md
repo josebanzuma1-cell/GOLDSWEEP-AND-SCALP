@@ -88,7 +88,8 @@ demo accounts.
   swing A+..B); the runner remembers the setup each scalp follows (`scalper.follows`)
   and closes it with `close_plan` (exit `setup_done`) once that setup reaches its last
   target. The shared daily limit is in money; a scalp and its adds count as one.
-  Built-in defaults keep the recovery features off; `config.yaml` turns them on.
+  The recovery features are off in the built-in defaults and in `config.yaml` (the
+  owner approved S10 with them off); tests of them use `tests.helpers.with_recovery`.
 - **Ticks** (D106): off since D111 (`ticks.record: false`); the code stays.
   `TickRecorder` saves each finished hour to `data/ticks/<symbol>/<YYYY-MM-DD>/<HH>.npz`
   (UTC ms, bid, ask); read them with `load_ticks`. Brokers serve ticks through

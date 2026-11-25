@@ -2283,3 +2283,11 @@ Past results do not predict future ones.
   - a sliver of daily budget.
 - The older pins moved: messages now show each scalp's risk, the per-mode book limits
   rose, and the daily limit is in money.
+
+**The owner's approval (2026-11-25): S10 approved with the recovery features OFF.** After
+the backtest above, the owner chose to keep martingale, grid / averaging down, HFT
+stacking and hedging between modes switched off (`enabled: false`, `hedge_modes: false`
+in `config.yaml`); the code, caps and tests stay, so any one can be switched on later.
+What runs: intraday and swing follow A+, A or B setups, HFT follows A or A+, every scalp
+closes when its setup reaches its last target, the daily limit counts money, and the
+lot cap is 2. Tests of the features use `tests.helpers.with_recovery`.
