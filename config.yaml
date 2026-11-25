@@ -218,6 +218,8 @@ backtest:
 # The live loop. PAPER (the default mode) simulates every order: nothing is sent.
 execution:
   auto_trade: true        # trade signals that clear auto_trade_threshold
+  signals_only: true      # S11 (D118): signals to Telegram only, you place the trades;
+                          # nothing is sent to MT5 (main alerts only, scalper on paper)
   bar_delay_seconds: 2    # read each M5 bar this long after it closes
   bar_wait_seconds: 30    # keep asking this long if the broker is late with it
   # LIVE only (python main.py --live, needs MODE=LIVE in .env AND mode: LIVE here):
@@ -428,6 +430,20 @@ scalper:
   # owner approved S10 with them OFF (2026-11-25). Each turns on with "enabled: true";
   # every order keeps its stop-loss and take-profit, and the 1% daily loss, the
   # 3-losses pause and the 0.75% open-risk ceiling still apply.
+  # Scalps enter on a retest (S11, D118): price comes back to the level the setup
+  # broke (the swept level, the range edge, the VWAP, the EMA; else 35% of the way back
+  # towards the stop) and closes back the trade's way. Missed if TP1 comes first or the
+  # window ends; failed if the stop is crossed first.
+  retest:
+    enabled: true
+    modes: [hft, intraday, swing]
+    pullback_r: 0.35
+    tolerance_atr: 0.1
+    window_hft_min: 10
+    window_intraday_min: 30
+    window_swing_min: 60
+  signal_min_grade: B            # scalp signals sent: A+, A and B (lower: recorded only)
+  signal_valid_min: 2            # a scalp signal is to be taken within 2 minutes
   recovery:
     martingale: {enabled: false, multiplier: 2.0, max_steps: 1, max_risk_pct: 0.5}
     #   after a losing scalp the mode's next one risks 0.5%, back to 0.25% after a win

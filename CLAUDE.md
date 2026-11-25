@@ -93,6 +93,18 @@ demo accounts.
   D117: the owner switched HFT's and intraday's grade filters off in `config.yaml`
   (built-in defaults keep them on); tests of the filters use
   `tests.helpers.with_grade_filters`.
+- **Signals only, retest entries** (S11, D118): `execution.signals_only` (on in
+  `config.yaml`) makes GoldSweep a signal system: `_handle_signal` sends every graded main
+  setup as a manual trade (action `signal`) and follows it with
+  `execution/signal_watch.py` (`advance`, state `signals.watch`, run in `scalper_tick`:
+  entry zone, TP1 breakeven reminder, stop, expiry, miss); `_scalps_to_demo` is False so
+  scalps stay on paper and are sent as `messages.scalp_signal`. Scalps enter on a
+  retest (`scalping/retest.py`, `scalper.retest`, `Candidate.retest_level` /
+  `retested`; shared with `mode_backtest`) and are graded A+/A/B by
+  `scalping/grading.py` from `ScalpContext.graded` and `analysis` (built by
+  `Trader._graded_for` / `_scalp_analysis`). The shared test `settings` fixture switches
+  `signals_only` and the retest off (the older tests follow the trading paths); S11's
+  tests switch them on.
 - **Ticks** (D106): off since D111 (`ticks.record: false`); the code stays.
   `TickRecorder` saves each finished hour to `data/ticks/<symbol>/<YYYY-MM-DD>/<HH>.npz`
   (UTC ms, bid, ask); read them with `load_ticks`. Brokers serve ticks through

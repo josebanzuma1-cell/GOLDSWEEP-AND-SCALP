@@ -2319,3 +2319,151 @@ switch the grade filter off for HFT and intraday "for now".
 - On the demo account the caps still hold every scalp to 0.25% risk, the scalper to a 1%
   daily loss and 8 scalps a day, with the 3-losses pause and 2 lots a magic number.
 - The recovery features stay off (D116).
+
+### D118. S11: signals only, retest entries, graded scalp signals, reminders
+
+**The owner's request (2026-11-25):** forget the "flip $20 to $200" idea and auto-trading.
+GoldSweep becomes a signal system: A+, A and B setups of the main strategy and of the
+HFT, intraday and swing scalps, analysed with trends, levels and news, sent to Telegram
+with SL and TP1/TP2/TP3 (TP4/TP5 for HFT). The owner places every trade by hand.
+
+Added while it was built:
+
+- every entry should wait for the market's **retest** of the price it just left ("the
+  perfect entry");
+- a reminder to **move the stop to breakeven after TP1**;
+- every signal should say **which kind it is** (main, HFT, intraday, swing).
+
+The owner chose two messages for main setups (the plan, then "price is at the entry
+zone"), one for scalps (when the retest is confirmed), and every grade sent (A+, A, B).
+
+**Built:**
+
+- **Signals only** (`execution.signals_only: true` in `config.yaml`; built-in false):
+  - the main strategy sends every graded setup (A+, A and B) as a manual trade, whatever
+    `auto_trade` says, and places nothing;
+  - the scalper's modes stay on paper even when approved for the demo account (the
+    approvals are kept and do nothing);
+  - nothing at all is sent to MT5;
+  - the start message and `/status` open with "📲 SIGNALS ONLY: you place every trade;
+    nothing is sent to MT5";
+  - the paper books still track every scalp signal, so `/stats` shows how the signals
+    would have done, and the scalper's daily limits (8 a day, a pause after 3 losses)
+    cap the signals.
+- **Main signals:**
+  - **message 1:** "📲 MAIN SIGNAL A+ ..." with a `Type:` line ("MAIN TRADE: M5
+    liquidity sweep, held for hours"), entry, SL, TP1-TP3, the suggested lots for the
+    account at the risk setting, and "MANUAL TRADE: place a limit at 2028.90 (FVG mid:
+    the retest zone), valid until 09:55 UTC. After TP1, move your stop to breakeven."
+  - **The retest for the main strategy already existed.** It waits up to 2 hours for
+    price to come back into the gap the move left, its best-tested entry (D82: +0.52 R a
+    trade in 2024-2026). A tighter M1 confirmation made it worse (D83) and stays off.
+  - **The watcher** (`execution/signal_watch.py`, a pure `advance(watch, bars)`; state
+    `signals.watch`, kept over a restart; run each minute after the scalper's bars)
+    follows each manual setup on M1 bars and sends:
+    - 🎯 "price is at the entry zone now";
+    - ✅ "TP1 reached: take part profit and move your stop to breakeven";
+    - 🔴 "the stop was hit";
+    - ⌛ "no retest before ...: do not enter";
+    - ❌ "missed: do not chase" (TP1 came first);
+    - ❌ "setup failed" (the stop came first).
+
+    The same worse-case rules as the simulator apply.
+- **Scalp retest entries** (`scalping/retest.py`, shared by the runner and
+  `mode_backtest`; `scalper.retest`).
+  - **The level.** A scalp no longer enters on its signal bar; it names its retest level:
+    - sweep and reclaim: the swept level;
+    - range breakouts: the range edge;
+    - VWAP trend: the VWAP;
+    - EMA pullback: the EMA;
+    - any other setup: 35% of the way back to its stop anchor.
+  - **The watch.** Each M1 bar is checked:
+    - **confirmed:** the bar comes back to the level (within 0.1 ATR) and closes back
+      the trade's way. The entry is that close.
+    - **missed:** TP1 comes first, or the window ends (HFT 10, intraday 30, swing 60
+      minutes).
+    - **failed:** the stop anchor is crossed first.
+  - **The stop.** A retest entry sits close to the anchor, so a stop nearer than the
+    minimum (0.5 ATR) is widened to that minimum, still beyond the anchor; the size
+    shrinks with it (`Candidate.retested`). Market entries keep the old rule.
+- **Scalp grades** (`scalping/grading.py`, from the main strategy's picture each minute:
+  H1 bias, unswept pools, the next release, the live graded main setups via
+  `backing_grade`):
+  - **A+:** a live A+ main setup (or "A+ possible") its way, with the H1 bias, no
+    high-impact release within 30 minutes;
+  - **A:** a live A or A+ main setup, or a key level (session or twin-bar level, or a
+    pool within 0.2 ATR) with the H1 bias, and no release within 30 minutes;
+  - **B:** with the H1 bias, or the bias is neutral;
+  - **none:** against the H1 bias with no main setup: recorded, not sent
+    (`signal_min_grade: B`).
+
+  The pressure meter is shown, never scored.
+- **The scalp signal** ("📲 SCALP SIGNAL HFT A BUY XAUUSD (manual trade)") contains:
+  - its `Type:` line (HFT: "1-minute chart, held seconds to 15 minutes"; intraday: "closed
+    by the New York close"; swing: "held hours to two days");
+  - "Enter now ~2029.10: retest of 2028.50 confirmed";
+  - the SL and every TP;
+  - the suggested lots for the account;
+  - why the grade;
+  - the setup, the market (H1 bias, news bias, pressure as an estimate, the next
+    release) and the nearest levels;
+  - "Valid 2 min: skip it if price is already past ...";
+  - "After TP1, move your stop to breakeven".
+
+  When the tracked scalp reaches TP1, "✅ ... TP1 reached ... move your stop to
+  breakeven (2029.20, just past the entry to cover costs)" follows. When it ends, "📊
+  Signal result (tracked on paper)" follows.
+- **Not built:** auto-starting the bot or a VPS. Signals need the PC on, awake and online
+  with MT5 and the bot window open during the hours wanted (London and New York, about
+  10:00-00:00 Kampala time). `deploy\install-tasks.ps1` can start it at set times.
+
+**The retest backtest** (`mode_backtest`, 2024-01-01..2026-10-31, a 10,000 balance, this
+account's costs, the grade filters off, recovery off; "market" enters on the signal bar
+as before):
+
+| Mode | Entry | Trades | Won | PF | R a trade | Return | Max DD | Retests: confirmed / missed / failed |
+|---|---|---|---|---|---|---|---|---|
+| HFT | market | 4,153 | 62.6% | 0.56 | -0.12 | -69.6% | 69.6% | |
+| HFT | retest | 873 | 48.7% | 0.46 | -0.24 | -43.9% | 44.3% | 1,081 / 5,027 / 912 of 7,411 |
+| Intraday | market | 1,381 | 50.3% | 0.93 | -0.03 | -10.8% | 18.3% | |
+| Intraday | retest | 822 | 45.7% | 0.75 | -0.13 | -23.3% | 26.3% | 1,014 / 920 / 172 of 2,396 |
+| Swing | market | 817 | 46.8% | 0.85 | -0.07 | -12.0% | 13.6% | |
+| Swing | retest | 623 | 46.2% | 0.88 | -0.07 | -8.0% | 10.0% | 888 / 379 / 44 of 1,399 |
+
+**What this shows.**
+
+- **HFT and intraday:** waiting for the retest made each signal worse (-0.24 R against
+  -0.12 R, and -0.13 R against -0.03 R). The setups that do come back to their level are
+  more often the ones that fail.
+- **HFT's total loss is smaller** only because two in three setups never retest, so far
+  fewer trades are taken.
+- **Swing scalping:** the result per trade is unchanged, with fewer trades and a
+  shallower drawdown.
+- **Worst trading days** stay near the 1% daily limit (HFT -1.13%, intraday -0.69%,
+  swing -1.34%: fills beyond the stop and positions held across the day boundary).
+- **The main strategy's** retest (the gap middle) remains its best-tested entry (D82).
+- **Overall:** for the scalps this history does not support the retest as "the perfect
+  entry". It is shipped on, as the owner asked, and each mode can drop it from
+  `scalper.retest.modes`.
+
+Past results do not predict future ones.
+
+**Checked here:** the full test suite, including 18 new tests in
+`tests/test_s11_signals.py`:
+
+- the shipped settings;
+- the retest level, confirmation, miss and failure, the entry moving to the retest, and
+  the widened minimum stop;
+- grading and the main setup behind a scalp;
+- the scalp and main signal messages;
+- the main-setup watcher (entry, TP1, stop, expiry, miss; kept over a restart) and its
+  messages;
+- the bot following a manual main setup;
+- a scalp signal after its retest with the breakeven reminder;
+- no signal when the retest never comes;
+- signals only sending nothing to MT5, with the approvals kept;
+- a main setup sent as a manual trade;
+- the status line;
+- the backtest's retest.
+
+The older tests run with signals only and the retest switched off in the shared fixture.

@@ -632,6 +632,10 @@ class ExecutionConfig(_StrictModel):
 
     #: Take signals that clear the auto-trade threshold (on paper in PAPER mode).
     auto_trade: bool = True
+    #: Signals only (S11, D118): the owner places every trade by hand. The main strategy
+    #: sends alerts only whatever ``auto_trade`` says, the scalper's modes stay on paper
+    #: (approvals are kept and do nothing), and nothing is sent to MT5.
+    signals_only: bool = False
     #: Seconds to wait after each bar close before reading the bar from the broker.
     bar_delay_seconds: int = Field(default=2, ge=0, le=60)
     #: Keep asking this long when the broker has not published the bar yet.
@@ -1054,6 +1058,36 @@ class HftConfig(_StrictModel):
         return value
 
 
+RetestMode = Literal["hft", "intraday", "swing"]
+
+
+class RetestConfig(_StrictModel):
+    """Scalps enter on a retest (S11, D118): after a setup, wait for price to come back
+    to the level it broke (within ``tolerance_atr`` ATR) and close back the trade's way.
+
+    A setup without a level of its own retests the point ``pullback_r`` of the way back
+    from its signal close towards its stop. Missed when price reaches TP1 first or the
+    window ends; failed when it crosses the stop first.
+    """
+
+    enabled: bool = False
+    #: Modes that wait for a retest (the others enter on the signal bar, as before).
+    modes: tuple[RetestMode, ...] = ("hft", "intraday", "swing")
+    pullback_r: float = Field(default=0.35, gt=0, lt=1)
+    tolerance_atr: float = Field(default=0.1, ge=0, le=2)
+    window_hft_min: int = Field(default=10, ge=1, le=240)
+    window_intraday_min: int = Field(default=30, ge=1, le=480)
+    window_swing_min: int = Field(default=60, ge=1, le=1440)
+
+    def window(self, mode: str) -> int:
+        """Minutes ``mode`` waits for its retest."""
+        return {
+            "hft": self.window_hft_min,
+            "intraday": self.window_intraday_min,
+            "swing": self.window_swing_min,
+        }[mode]
+
+
 class MartingaleConfig(_StrictModel):
     """After a losing scalp, the mode's next scalp risks more (S10, D116): the base times
     ``multiplier`` per loss in a row, at most ``max_steps`` steps and ``max_risk_pct``;
@@ -1163,6 +1197,11 @@ class ScalperConfig(_StrictModel):
     h1_trend: H1TrendConfig = H1TrendConfig()
     hft: HftConfig = HftConfig()
     recovery: RecoveryConfig = RecoveryConfig()
+    retest: RetestConfig = RetestConfig()
+    #: Scalp signals (S11): the lowest grade sent to Telegram (A+, A or B; lower ones
+    #: are recorded only) and how long a scalp signal stays valid.
+    signal_min_grade: Literal["A+", "A", "B"] = "B"
+    signal_valid_min: int = Field(default=2, ge=1, le=60)
 
     def magic_for(self, mode: str) -> int:
         """The magic number of ``mode``'s orders (hft, intraday, swing)."""

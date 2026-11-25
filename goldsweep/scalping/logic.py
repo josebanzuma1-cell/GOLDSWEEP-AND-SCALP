@@ -65,6 +65,10 @@ class Candidate:
     reason: str
     close_by: dt.datetime | None = None
     source: Any = None  # the engine's own setup
+    #: The level the setup broke or reclaimed, which a retest comes back to (S11, D118).
+    retest_level: float | None = None
+    #: Entered on its retest: a stop closer than the minimum is widened to it (S11).
+    retested: bool = False
 
 
 #: Step-line points kept for the chart (three hours of M1 bars).
@@ -157,6 +161,15 @@ def anchored_plan(
     if risk <= 0:
         return ScalpPlan(None, "the stop is on the wrong side")
     multiple = risk / candidate.atr
+    if candidate.retested and multiple < sl_min_atr - _EPSILON:
+        # A retest entry sits close to the anchor: the stop goes the minimum distance
+        # away instead (still beyond the anchor), and the size shrinks with it (S11).
+        risk = sl_min_atr * candidate.atr
+        stop = candidate.reference - sign * risk
+        if candidate.direction is Direction.SHORT:
+            stop += costs.spread
+            risk += costs.spread
+        multiple = risk / candidate.atr
     if not sl_min_atr - _EPSILON <= multiple <= sl_max_atr + _EPSILON:
         return ScalpPlan(None, f"no stop within {sl_min_atr:g}-{sl_max_atr:g} ATR")
     if ladder[0] * risk < cost_multiple * costs.round_trip - _EPSILON:
@@ -308,7 +321,18 @@ class HftLogic(ModeLogic):
         if point is not None and not math.isnan(point.line):
             self.points.append((opened, point.line, point.trend))
         return [
-            Candidate(s.time, s.direction, s.mode, s.reference, s.extreme, s.atr, s.reason, None, s)
+            Candidate(
+                s.time,
+                s.direction,
+                s.mode,
+                s.reference,
+                s.extreme,
+                s.atr,
+                s.reason,
+                None,
+                s,
+                s.level_price if s.level_price is not None else s.trail_line,
+            )
             for s in setups
         ]
 
@@ -348,6 +372,7 @@ class HftLogic(ModeLogic):
             bar=MINUTE,
             split=hft.split,
             step_r=hft.step_r,
+            widen_to_min=candidate.retested,
         )
 
 
@@ -401,6 +426,7 @@ class IntradayLogic(ModeLogic):
                             f"M5: {s.reason}",
                             next_rollover(self._sessions, s.time),
                             s,
+                            s.level_price,
                         )
                     )
             if self._rules is not None:
@@ -418,6 +444,7 @@ class IntradayLogic(ModeLogic):
                             f"M5: {r.detail}",
                             r.close_by,
                             r,
+                            r.level,
                         )
                     )
                 if not math.isnan(self._rules.vwap):
@@ -525,6 +552,7 @@ class SwingLogic(ModeLogic):
                         f"M15: {s.detail}",
                         self._close_by(s.time),
                         s,
+                        s.level,
                     )
                 )
             ema = self.engine.ema

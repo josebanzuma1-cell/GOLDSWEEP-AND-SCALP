@@ -127,13 +127,15 @@ def signal_alert(
     plan: TradePlan | None = None,
     grade: str | None = None,
     monitoring: str | None = None,
+    manual: bool = False,
 ) -> str:
     """``plan``, when given, supplies the targets actually used (fixed-R targets, D84).
 
     ``grade`` is the setup's grade (A+ / A / B, D86) and ``monitoring`` says whether
-    it went on the shadow book for its session's A+ candidate (D87).
+    it went on the shadow book for its session's A+ candidate (D87). ``manual`` (signals
+    only, S11): the owner places the trade; ``lots`` is then a suggestion.
     """
-    icon = "🟢" if traded else ("⛔" if blocked else "🟡")
+    icon = "📲" if manual else ("🟢" if traded else ("⛔" if blocked else "🟡"))
     tp1, tp2, rr1 = signal.take_profit_1, signal.take_profit_2, signal.risk_reward_1
     rr2_value = signal.risk_reward_2
     if plan is not None:
@@ -141,11 +143,16 @@ def signal_alert(
         rr1 = plan.risk_reward_1
         rr2_value = abs(tp2 - plan.entry) / plan.risk_distance if tp2 is not None else None
     rr2 = f" / {rr2_value:.1f}" if rr2_value is not None else ""
-    risk = f"Risk {risk_pct:g}%" + (f" ({lots:g} lots)" if lots else "")
+    if manual:
+        risk = f"Risk {risk_pct:g}%" + (f": about {lots:g} lots on your account" if lots else "")
+    else:
+        risk = f"Risk {risk_pct:g}%" + (f" ({lots:g} lots)" if lots else "")
     model = "" if signal.model == "sweep_mss" else f" [{model_name(signal.model)} model]"
+    head = f"MAIN SIGNAL {grade.split(' ')[0]} " if manual and grade else ""
     lines = [
-        f"{icon} {signal.symbol} {signal.direction.value} setup{model} (score {signal.score:.1f}) "
-        f"— {session_name(signal.session)}",
+        f"{icon} {head}{signal.symbol} {signal.direction.value} setup{model} "
+        f"(score {signal.score:.1f}) — {session_name(signal.session)}",
+        *([f"Type: {SIGNAL_TYPES['main']}"] if manual else []),
         f"Swept: {signal.pool.label} {signal.pool.price:.2f} → MSS confirmed (M5)",
         f"Entry: {signal.entry:.2f} ({entry_text(signal)}) | SL: {signal.stop_loss:.2f} | "
         f"TP1: {tp1:.2f} | TP2: {_price(tp2)}"
@@ -164,6 +171,41 @@ def signal_alert(
         lines.append(f"👀 {monitoring}")
     lines.append(f"Mode: {mode}  |  id: {signal.id}")
     return "\n".join(lines)
+
+
+def watch_message(watch: Any, event: str) -> str:
+    """A manual main setup's next step (S11, D118): a
+    :class:`~goldsweep.execution.signal_watch.SignalWatch` and what just happened."""
+    side = "BUY" if watch.direction.value == "LONG" else "SELL"
+    name = f"Main {side} {watch.id} ({watch.grade})"
+    targets = " | ".join(
+        f"TP{n} {t:.2f}"
+        for n, t in enumerate((watch.take_profit_1, watch.take_profit_2, watch.take_profit_3), 1)
+        if t is not None
+    )
+    if event == "entry":
+        return (
+            f"🎯 {name}: price is at the entry zone now ({watch.entry:.2f}), the retest.\n"
+            f"Manual trade: enter if you have not | SL {watch.stop:.2f} | {targets}"
+        )
+    if event == "tp1":
+        return (
+            f"✅ {name}: TP1 {watch.take_profit_1:.2f} reached. Take part profit and move "
+            f"your stop to breakeven ({watch.entry:.2f})."
+        )
+    if event == "stopped":
+        return f"🔴 {name}: the stop {watch.stop:.2f} was hit."
+    if event == "expired":
+        return (
+            f"⌛ {name}: no retest of {watch.entry:.2f} before {watch.expires_at:%H:%M} UTC. "
+            "The setup expired: do not enter."
+        )
+    if event == "missed":
+        return (
+            f"❌ {name}: price reached TP1 without coming back to {watch.entry:.2f}. "
+            "Missed: do not chase it."
+        )
+    return f"❌ {name}: price crossed the stop {watch.stop:.2f} before the retest: setup failed."
 
 
 def tally_text(tally: Any) -> str:
@@ -265,6 +307,92 @@ def scalp_placed(plan: TradePlan, event: BookEvent, mode: str, where: str, reaso
     return (
         f"⚡ Scalp {mode.upper()} {plan.direction.value} {plan.id} ({place}{lots}): "
         f"market | SL {plan.stop_loss:.2f} | TP {targets}\n{reason}"
+    )
+
+
+#: What each kind of signal is, said plainly in every manual signal (S11, D118).
+SIGNAL_TYPES = {
+    "main": "MAIN TRADE: M5 liquidity sweep, held for hours (TP1-TP3)",
+    "hft": "HFT SCALP: 1-minute chart, held seconds to 15 minutes (TP1-TP5)",
+    "intraday": "INTRADAY SCALP: 5-minute chart, closed by the New York close (TP1-TP3)",
+    "swing": "SWING SCALP: 15-minute chart, held hours to two days (TP1-TP3)",
+}
+_MODE_NAMES = {"hft": "HFT", "intraday": "INTRADAY", "swing": "SWING"}
+
+
+def scalp_signal(
+    plan: TradePlan,
+    mode: str,
+    grade: Any,
+    analysis: Any,
+    *,
+    reason: str,
+    retest: float | None,
+    lots: float | None,
+    valid_min: int,
+) -> str:
+    """A scalp to take by hand (signals only, S11): its kind, grade, retest entry, SL and
+    every TP, the suggested size and the market picture (a
+    :class:`~goldsweep.scalping.grading.Analysis`)."""
+    side = "BUY" if plan.direction.value == "LONG" else "SELL"
+    sign = 1.0 if side == "BUY" else -1.0
+    targets = " | ".join(f"TP{n} {t:.2f}" for n, t in enumerate(plan.targets, 1) if t is not None)
+    late = plan.entry + sign * 0.5 * abs(plan.take_profit_1 - plan.entry)
+    pct = plan.risk_pct
+    risk = f"Risk {pct:.2g}%" if pct is not None else "Risk 0.25%"
+    if lots:
+        risk += f": about {lots:g} lots on your account"
+    lines = [
+        f"📲 SCALP SIGNAL {_MODE_NAMES.get(mode, mode.upper())} {grade.letter} {side} XAUUSD "
+        "(manual trade)",
+        f"Type: {SIGNAL_TYPES.get(mode, mode)}",
+        (
+            f"Enter now ~{plan.entry:.2f}: retest of {retest:.2f} confirmed"
+            if retest is not None
+            else f"Enter now ~{plan.entry:.2f}"
+        ),
+        f"SL {plan.stop_loss:.2f} | {targets}",
+        risk,
+        f"Why {grade.letter}: {'; '.join(grade.reasons)}",
+        f"Setup: {reason}",
+        f"Market: H1 {analysis.bias_text}"
+        + (f" | news bias {analysis.news_bias:+.2f}" if analysis.news_bias is not None else "")
+        + (f" | pressure {analysis.pressure} (estimate)" if analysis.pressure else "")
+        + (f" | next: {analysis.next_event}" if analysis.next_event else ""),
+    ]
+    levels = []
+    if analysis.above:
+        levels.append("above " + ", ".join(f"{p:.2f} ({label})" for p, label in analysis.above[:2]))
+    if analysis.below:
+        levels.append("below " + ", ".join(f"{p:.2f} ({label})" for p, label in analysis.below[:2]))
+    if levels:
+        lines.append("Levels: " + " | ".join(levels))
+    lines += [
+        f"Valid {valid_min} min: skip it if price is already past {late:.2f}. "
+        "After TP1, move your stop to breakeven.",
+        f"id: {plan.id}",
+    ]
+    return "\n".join(lines)
+
+
+def scalp_signal_result(trade: Any, mode: str) -> str:
+    """How a scalp signal ended, as tracked on paper (signals only, S11)."""
+    icon = "📊" if trade.net_pnl >= 0 else "🔴"
+    side = "BUY" if trade.plan.direction.value == "LONG" else "SELL"
+    return (
+        f"{icon} Signal result (tracked on paper): {_MODE_NAMES.get(mode, mode)} {side} "
+        f"{trade.plan.id} ended at {trade.exit_reason.value}, {trade.r_multiple:+.2f} R "
+        f"after {duration(trade.exit_time - trade.fill_time)}"
+    )
+
+
+def breakeven_reminder(plan: TradePlan, mode: str, stop: float | None) -> str:
+    """TP1 reached on a scalp signal: move the stop to breakeven (signals only, S11)."""
+    side = "BUY" if plan.direction.value == "LONG" else "SELL"
+    level = f" ({stop:.2f}, just past the entry to cover costs)" if stop is not None else ""
+    return (
+        f"✅ {_MODE_NAMES.get(mode, mode)} {side} {plan.id}: TP1 {plan.take_profit_1:.2f} "
+        f"reached. Take part profit and move your stop to breakeven{level}."
     )
 
 

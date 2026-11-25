@@ -50,6 +50,9 @@ class SwingScalpSetup:
     anchor: float  # what the stop goes beyond
     atr: float  # the M15 ATR
     detail: str
+    #: The level the setup broke, which a retest comes back to (S11): the EMA, the
+    #: range edge.
+    level: float | None = None
 
 
 @dataclass
@@ -212,7 +215,9 @@ class SwingScalpEngine:
             anchor = max(highs)
             detail = f"pulled back to the M15 EMA {ema:.2f} and closed below it, H1 trend down"
         return [
-            SwingScalpSetup(candle.closed, trend, EMA_PULLBACK, candle.close, anchor, atr, detail)
+            SwingScalpSetup(
+                candle.closed, trend, EMA_PULLBACK, candle.close, anchor, atr, detail, ema
+            )
         ]
 
     def _breakout(self, candle: Candle, trend: Direction, atr: float) -> list[SwingScalpSetup]:
@@ -254,6 +259,7 @@ class SwingScalpEngine:
                     atr,
                     f"closed {side} the {label} range {box.low:.2f}-{box.high:.2f} with the "
                     f"H1 trend; stop beyond its middle {box.middle:.2f}",
+                    box.high if trend is Direction.LONG else box.low,
                 )
             )
             break  # one setup a bar

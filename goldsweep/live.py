@@ -94,12 +94,14 @@ from goldsweep.execution.executor import (
 )
 from goldsweep.execution.panel import PanelWriter
 from goldsweep.execution.shadow import ShadowBook, Tally, fingerprint
+from goldsweep.execution.signal_watch import DONE, SignalWatch, advance
 from goldsweep.risk.account_guard import AccountGuard
-from goldsweep.risk.risk_manager import NewsEvent
+from goldsweep.risk.risk_manager import NewsEvent, position_size
 from goldsweep.scalping import modes as scalper_modes
 from goldsweep.scalping import stats as scalper_stats
 from goldsweep.scalping.chart import PANEL_COMMANDS, ScalpPanel
 from goldsweep.scalping.grade_filter import GradedSetup, accepts
+from goldsweep.scalping.grading import Analysis
 from goldsweep.scalping.logic import ChartMarks
 from goldsweep.scalping.modes import (
     MODE_NAMES,
@@ -167,6 +169,9 @@ SCALPER_MODES_KEY = "switch.scalper_modes"  # a list: one, two or all three mode
 SCALPER_MODE_KEY = "switch.scalper_mode"  # S5-S8's single mode, read when no list is set
 SCALPER_APPROVED_KEY = "scalper.approved"
 STRATEGY_CHOICES = ("main", "scalper", "both")
+#: Manual main setups followed on M1 bars for the retest, TP1 and the stop (S11).
+WATCH_KEY = "signals.watch"
+SIGNALS_ONLY_LINE = "📲 SIGNALS ONLY: you place every trade; nothing is sent to MT5."
 #: The last chart-panel command carried out (S7, D113).
 PANEL_COMMAND_KEY = "scalper.panel.command"
 #: Lines of the latest scenario brief shown in the chart's analysis box (S8, D114).
@@ -565,6 +570,8 @@ class Trader:
         """Scalps of ``mode`` go to the MT5 account: approved, live, and a demo account
         (a real one also needs the forward-test file, D93)."""
         slot = self.scalper.slots.get(mode)
+        if self._config.execution.signals_only:
+            return False  # S11: signals only, the owner places every trade
         if not self.live or slot is None or slot.demo is None:
             return False
         if not self._scalper_approved(mode):
@@ -576,6 +583,7 @@ class Trader:
         may_open = self.trading == ACTIVE and self.strategies in ("scalper", "both") and bool(built)
         demo_modes = frozenset(m for m in built if self._scalps_to_demo(m))
         demo = bool(demo_modes)
+        signals = self._config.execution.signals_only
         return ScalpContext(
             mode=modes_key(built),
             may_open=may_open,
@@ -583,10 +591,60 @@ class Trader:
             events=self._news.blackouts(now) if self._news else (),
             # On the demo account the scalps share the account with the main strategy.
             main_exposures=ScalperRunner.exposures(self.executor) if demo else None,
-            equity=self.executor.equity if demo else 0.0,
+            equity=self.executor.equity if demo or signals else 0.0,
             modes=built,
             demo_modes=demo_modes,
             setups={mode: self._mode_setups(mode, now) for mode in built},
+            graded={mode: self._graded_for(mode, now) for mode in built},
+            analysis=self._scalp_analysis(now),
+        )
+
+    def _graded_for(self, mode: str, now: dt.datetime) -> list[GradedSetup]:
+        """Every live A+, A or B main setup over ``mode``'s window, for grading (S11)."""
+        scalper = self._config.scalper
+        minutes = {
+            "hft": scalper.hft.a_window_min,
+            "intraday": scalper.intraday.setup_window_min,
+            "swing": scalper.swing_scalp.setup_window_min,
+        }.get(mode, scalper.hft.a_window_min)
+        return self._graded_setups(now, "b", minutes) or []
+
+    def _scalp_analysis(self, now: dt.datetime) -> Analysis:
+        """The main strategy's picture of the market, sent with each scalp signal (S11)."""
+        h1 = self.engine.bias
+        bias: Direction | None = None
+        score: float | None = None
+        if h1 is not None:
+            score = h1.score
+            if h1.bias.value in ("LONG", "SHORT"):
+                bias = Direction(h1.bias.value)
+        market = self._snapshot_market or {}
+        pressure = (market.get("pressure") or {}).get("text")
+        event = self._news.next_event(now) if self._news else None
+        price = self.scalper.last_close or market.get("price")
+        pools = [p for p in self.engine.pools if not p.swept]
+        above: list[tuple[float, str]] = []
+        below: list[tuple[float, str]] = []
+        if price is not None:
+            above = sorted((p.price, p.label) for p in pools if p.price > price)[:4]
+            below = sorted(
+                ((p.price, p.label) for p in pools if p.price <= price), key=lambda x: -x[0]
+            )[:4]
+        return Analysis(
+            bias=bias,
+            bias_score=score,
+            news_bias=market.get("news_bias"),
+            pressure=pressure,
+            next_event=(
+                f"{event.currency} {event.title} in {messages.duration(event.time - now)}"
+                if event is not None
+                else ""
+            ),
+            minutes_to_event=(
+                (event.time - now).total_seconds() / 60 if event is not None else None
+            ),
+            above=tuple(above),
+            below=tuple(below),
         )
 
     def _mode_setups(self, mode: str, now: dt.datetime) -> list[GradedSetup] | None:
@@ -673,6 +731,7 @@ class Trader:
         texts = self.scalper.step(self._scalp_context(now))
         for text in texts:
             self._send(text)
+        self._watch_tick(now)  # manual main setups: retest, TP1, stop (S11)
         if texts:  # a scalp opened or closed: the dashboard shows it at once
             self._write_snapshot(now)
         if self._scalp_panel is not None:
@@ -1295,6 +1354,11 @@ class Trader:
         duplicate = self._duplicate_of(signal)
         if duplicate is not None:
             action, text = "duplicate", f"same raid as {duplicate}: ignored"
+        elif execution.signals_only:
+            # S11 (D118): signals only. Every graded setup (A+, A or B) goes to Telegram
+            # as a manual trade; nothing is sent to MT5.
+            action, text = "signal", self._manual_text(plan, signal)
+            lots = self._suggested_lots(plan)
         elif not signal.meets_alert:
             action, text = (
                 "below_alert",
@@ -1360,10 +1424,72 @@ class Trader:
                 plan=plan,
                 grade=grade_text,
                 monitoring=monitoring,
+                manual=action == "signal",
             )
         )
+        if action == "signal":
+            self._watch_signal(signal, plan, grade_text)
         self._report(follow_up)
         return pressure
+
+    def _watch_signal(self, signal: Signal, plan: TradePlan, grade: str | None) -> None:
+        """Follow a manual main setup on M1 bars: the retest, TP1, the stop (S11)."""
+        watch = SignalWatch(
+            id=signal.id,
+            direction=plan.direction,
+            grade=(grade or "").split(" ")[0],
+            entry=plan.entry,
+            stop=plan.stop_loss,
+            take_profit_1=plan.take_profit_1,
+            take_profit_2=plan.take_profit_2,
+            take_profit_3=plan.take_profit_3,
+            created=signal.time,
+            expires_at=plan.expires_at,
+        )
+        kept = [w for w in self._watches() if w.id != watch.id]
+        self._db.set_state(WATCH_KEY, [w.to_state() for w in [*kept, watch]])
+
+    def _watches(self) -> list[SignalWatch]:
+        return [SignalWatch.from_state(item) for item in self._db.get_state(WATCH_KEY, [])]
+
+    def _watch_tick(self, now: dt.datetime) -> None:
+        """Advance every followed main setup on the M1 bars read this minute (S11)."""
+        watches = self._watches()
+        if not watches:
+            return
+        path = list(self.scalper.path)
+        kept: list[SignalWatch] = []
+        for watch in watches:
+            later, events = advance(watch, path)
+            for event in events:
+                self._send(messages.watch_message(later, event))
+            if later.stage != DONE:
+                kept.append(later)
+        self._db.set_state(WATCH_KEY, [w.to_state() for w in kept])
+
+    def _manual_text(self, plan: TradePlan, signal: Signal) -> str:
+        """How to take a main setup by hand (S11, D118): its retest entry and validity."""
+        if plan.entry_mode == "market":
+            where = f"enter at market now (~{plan.entry:.2f})"
+        else:
+            where = (
+                f"place a limit at {plan.entry:.2f} ({messages.entry_text(signal)}: the "
+                f"retest zone), valid until {plan.expires_at:%H:%M} UTC"
+            )
+            if plan.expiry_note:
+                where += f" (before {plan.expiry_note})"
+        return f"MANUAL TRADE: {where}. After TP1, move your stop to breakeven."
+
+    def _suggested_lots(self, plan: TradePlan) -> float | None:
+        """Lots for the main strategy's risk on this account, for a manual trade."""
+        size = position_size(
+            self.executor.equity,
+            plan.entry,
+            plan.stop_loss,
+            self.spec,
+            self._config.risk.risk_per_trade_pct,
+        )
+        return size.lots if size.ok else None
 
     def _store_signal(
         self,
@@ -1981,6 +2107,13 @@ class Trader:
             next_window=window,
             llm=self._news.analyzer.llm_status(now) if self._news else "news layer off",
         )
+        if self._config.execution.signals_only:
+            text = SIGNALS_ONLY_LINE + "\n" + text
+            followed = self._watches()
+            if followed:
+                text += "\nMain setups followed: " + ", ".join(
+                    f"{w.id} ({w.grade}, {w.stage})" for w in followed
+                )
         armed = self._armed()
         if armed:
             waiting = ", ".join(f"{s.id} until {s.expires_at:%H:%M} UTC" for s in armed)
@@ -2500,7 +2633,9 @@ def run_live(
             f"🚀 GoldSweep {trader.label} started: {spec.name} on account {account.login}, "
             f"balance {account.balance:,.2f} {account.currency}, trading {trader.trading}. "
             f"Strategies: {trader.strategies}; scalper: {trader.scalper_line}."
-            f"{found}{waiting}" + ("" if bot else " (Telegram not configured: alerts print here.)")
+            + (f" {SIGNALS_ONLY_LINE}" if settings.config.execution.signals_only else "")
+            + f"{found}{waiting}"
+            + ("" if bot else " (Telegram not configured: alerts print here.)")
         )
         trader.sync()
         if not run_scheduler:

@@ -64,6 +64,7 @@ from goldsweep.scalping.recovery import (
     primary_of,
     stack_refusal,
 )
+from goldsweep.scalping.retest import CONFIRMED, RetestWatch, check, confirmed, retest_level
 from goldsweep.storage.db import Database
 
 LIMITATIONS = (
@@ -86,6 +87,7 @@ class ModeRun:
     metrics: Metrics
     days: int
     recovery: bool = False
+    retest: bool = False  # entries waited for a retest (S11)
 
     @property
     def per_day(self) -> float:
@@ -102,6 +104,18 @@ class ModeRun:
             return "-", 0.0
         key = min(days, key=lambda k: days[k])
         return key, days[key] / balance * 100.0
+
+
+def without_retest(settings: Settings) -> Settings:
+    """``settings`` with scalps entering on their signal bar (the S11 comparison run)."""
+    scalper = settings.config.scalper
+    retest = scalper.retest.model_copy(update={"enabled": False})
+    config = settings.config.model_copy(
+        update={"scalper": scalper.model_copy(update={"retest": retest})}
+    )
+    from dataclasses import replace as replace_settings
+
+    return replace_settings(settings, config=config)
 
 
 def without_recovery(settings: Settings) -> Settings:
@@ -144,6 +158,9 @@ def simulate(
     boundary = config.strategy.liquidity.day_boundary
     value = spec.value_per_price_unit
     adds: dict[str, list[float]] = {}
+    retest = config.scalper.retest
+    retesting = retest.enabled and mode in retest.modes
+    watch: RetestWatch | None = None
     ideas_today: dict[str, float] = {}
     today: dt.date | None = None
     day_net = 0.0
@@ -243,7 +260,47 @@ def simulate(
                 if placed.kind is EventKind.PLACED:
                     adds[primary] = [*done, add.risk_pct or pct]
                     outcomes["add"] += 1
-        for candidate in candidates:
+        # S11: a setup waits for its retest; the confirming bar makes the candidate.
+        ready: list[Candidate] = []
+        if watch is not None and opened >= watch.candidate.time:
+            outcome = check(watch, opened, h, low, c)
+            if outcome == CONFIRMED:
+                ready.append(confirmed(watch.candidate, c, opened + dt.timedelta(minutes=1)))
+                outcomes["retest confirmed"] += 1
+            elif outcome is not None:
+                outcomes[f"retest {outcome}"] += 1
+            if outcome is not None:
+                watch = None
+        if retesting:
+            for candidate in candidates:
+                if not start_ns <= to_ns(candidate.time) < end_ns:
+                    continue
+                gate = logic.gate(candidate)
+                if not gate.passed:
+                    outcomes[gate.reason or "gate"] += 1
+                    continue
+                probe = logic.plan(
+                    candidate,
+                    LadderCosts.of(spec, costs_cfg, float(points[i]))
+                    if costs
+                    else LadderCosts(0.0, 0.0, 0.0),
+                    plan_id="retest",
+                    session=gate.session,
+                )
+                if probe.plan is None:
+                    outcomes["no_plan"] += 1
+                    rejections[probe.reason.split(" (")[0]] += 1
+                    continue
+                level = retest_level(candidate, retest.pullback_r)
+                watch = RetestWatch(
+                    candidate=replace(candidate, retest_level=level),
+                    level=level,
+                    target=probe.plan.take_profit_1,
+                    tolerance=retest.tolerance_atr * candidate.atr,
+                    deadline=candidate.time + dt.timedelta(minutes=retest.window(mode)),
+                )
+                outcomes["waited for a retest"] += 1
+        for candidate in ready if retesting else candidates:
             if not start_ns <= to_ns(candidate.time) < end_ns:
                 continue
             stacked = False
@@ -319,7 +376,15 @@ def simulate(
     in_period = m1.index[(m1.index >= pd.Timestamp(start)) & (m1.index < pd.Timestamp(end))]
     days = len(set(in_period.date))
     return ModeRun(
-        mode, costs, trades, outcomes, rejections, summarize(trades, balance), days, recovering
+        mode,
+        costs,
+        trades,
+        outcomes,
+        rejections,
+        summarize(trades, balance),
+        days,
+        recovering,
+        retesting,
     )
 
 
@@ -405,6 +470,7 @@ def write_report(
     balance: float,
     plain: ModeRun | None = None,
     boundary: DayBoundaryConfig | None = None,
+    market: ModeRun | None = None,
 ) -> Path:
     boundary = boundary or DayBoundaryConfig()
     folder.mkdir(parents=True, exist_ok=True)
@@ -421,6 +487,8 @@ def write_report(
         "recovery": net.recovery,
         "worst_day": dict(zip(("date", "pct"), net.worst_day(balance, boundary), strict=True)),
         "without_recovery": _metrics_json(plain.metrics) if plain is not None else None,
+        "retest": net.retest,
+        "market_entry": _metrics_json(market.metrics) if market is not None else None,
         "outcomes": dict(sorted(net.outcomes.items())),
         "no_plan": dict(sorted(net.rejections.items())),
         "breakdowns": breakdowns(net, balance),
@@ -505,6 +573,11 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
         if net.recovery
         else None
     )
+    market = (
+        simulate(without_retest(settings), m1, spec, args.mode, start, end, costs=True)
+        if net.retest
+        else None
+    )
     period = (f"{args.start:%Y-%m-%d}", f"{args.end:%Y-%m-%d}")
     folder = args.out or settings.config_path.parent / "reports" / (
         f"scalper_{args.mode}_{period[0]}_{period[1]}"
@@ -522,6 +595,7 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
         balance=balance,
         plain=plain,
         boundary=config.strategy.liquidity.day_boundary,
+        market=market,
     )
     first, last = halves(net, start, end, balance)
     print(f"GoldSweep scalper {args.mode} mode {spec.name} {period[0]} .. {period[1]}", file=out)
@@ -530,6 +604,8 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
     print(line("without costs", gross), file=out)
     if plain is not None:
         print(line("with costs, no recovery", plain), file=out)
+    if market is not None:
+        print(line("with costs, market entry", market), file=out)
     worst, pct = net.worst_day(balance, config.strategy.liquidity.day_boundary)
     print(f"Worst trading day: {pct:+.2f}% of the balance ({worst})", file=out)
     if net.recovery:

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import atexit
+import dataclasses
 import re
 import shutil
 import tempfile
@@ -81,12 +82,25 @@ def _isolated_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
-    """The shipped config.yaml, no .env file, data and logs in a temporary folder."""
-    return load_settings(
+    """The shipped config.yaml, no .env file, data and logs in a temporary folder.
+
+    ``execution.signals_only`` and the scalper's retest entries are switched off here
+    (the shipped file has them on since S11, D118): most tests follow the trading paths
+    with market entries; S11's tests switch them on.
+    """
+    loaded = load_settings(
         DEFAULT_CONFIG_PATH,
         read_env_file=False,
         data_dir=tmp_path / "data",
         log_dir=tmp_path / "logs",
+    )
+    config = loaded.config
+    execution = config.execution.model_copy(update={"signals_only": False})
+    scalper = config.scalper.model_copy(
+        update={"retest": config.scalper.retest.model_copy(update={"enabled": False})}
+    )
+    return dataclasses.replace(
+        loaded, config=config.model_copy(update={"execution": execution, "scalper": scalper})
     )
 
 

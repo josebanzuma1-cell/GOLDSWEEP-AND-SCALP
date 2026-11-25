@@ -114,6 +114,7 @@ def scalp_plan(
     bar: dt.timedelta,
     split: tuple[float, ...] | None = None,
     step_r: float | None = None,
+    widen_to_min: bool = False,
 ) -> ScalpPlan:
     """The market order for ``setup``, entered at the next bar's open.
 
@@ -139,6 +140,13 @@ def scalp_plan(
             continue
         if lowest - _EPSILON <= distance <= highest + _EPSILON:
             stop = level
+            break
+        if widen_to_min and 0 < distance < lowest:
+            # A retest entry (S11) sits close to the anchor: the stop goes the minimum
+            # distance away instead, still beyond it; the size shrinks with it.
+            stop = setup.reference - sign * lowest
+            if setup.direction is Direction.SHORT:
+                stop += costs.spread
             break
         tried.append(f"{distance / atr:.2f} ATR")
     if stop is None:

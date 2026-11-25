@@ -33,7 +33,7 @@ from goldsweep.execution.mt5_gateway import MT5Gateway
 from goldsweep.live import Trader
 from goldsweep.risk.account_guard import AccountGuard, Exposure
 from goldsweep.scalping.engine import SWEEP_RECLAIM, ScalpSetup
-from goldsweep.scalping.runner import ScalpContext, built_modes, demo_executor
+from goldsweep.scalping.runner import built_modes, demo_executor
 from goldsweep.storage.db import Database
 from tests.fake_mt5 import gold_symbol
 from tests.fake_mt5_trading import FakeTradingMT5
@@ -642,12 +642,16 @@ def test_unarmed_the_demo_executor_leaves_positions_to_their_stops(
 def test_scalp_context_on_paper(settings: Settings, db: Database) -> None:
     h = Harness(settings, db)
     context = h.trader._scalp_context(h.clock.now())  # noqa: SLF001
-    assert context == ScalpContext(
-        mode="off",
-        may_open=False,
-        demo=False,
-        events=(),
-        modes=frozenset(),
-        demo_modes=frozenset(),
-        setups={},
+    assert (context.mode, context.may_open, context.demo, context.events) == (
+        "off",
+        False,
+        False,
+        (),
     )
+    assert (context.modes, context.demo_modes, context.setups, context.graded) == (
+        frozenset(),
+        frozenset(),
+        {},
+        {},
+    )
+    assert context.analysis is not None and context.analysis.bias is None  # no M5 bar yet

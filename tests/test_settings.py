@@ -160,7 +160,7 @@ def test_built_in_defaults_equal_the_shipped_config(settings: Settings, tmp_path
     """An empty config file must behave exactly like the shipped one (apart from the
     owner's mode switch, which an empty file leaves at PAPER, and the owner's
     recorded changes, which an empty file leaves at the spec's values)."""
-    from goldsweep.core.settings import PlaybooksConfig
+    from goldsweep.core.settings import PlaybooksConfig, RetestConfig
 
     assert settings.config.execution.max_total_lots == 2.0
     scalper = settings.config.scalper
@@ -200,6 +200,8 @@ def test_built_in_defaults_equal_the_shipped_config(settings: Settings, tmp_path
                 update={
                     "hft": scalper.hft.model_copy(update={"grade_filter": "a"}),
                     "intraday": scalper.intraday.model_copy(update={"grade_filter": "b"}),
+                    # D118: scalps enter on a retest; the built-in default leaves it off.
+                    "retest": RetestConfig(),
                 }
             ),
         }

@@ -144,6 +144,10 @@ def test_other_models_alert_without_blocking_the_trading_model(
         data_dir=tmp_path / "data",
         log_dir=tmp_path / "logs",
     )
+    execution = shipped.config.execution.model_copy(update={"signals_only": False})
+    shipped = dataclasses.replace(  # the trading path (signals only is S11's own test)
+        shipped, config=shipped.config.model_copy(update={"execution": execution})
+    )
     h = Harness(shipped, db)
     h.run_until(utc(2026, 11, 17, 7, 55))
     traded, cisd = h.notes.sent  # the spec's model first, then the CISD model

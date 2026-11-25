@@ -64,6 +64,9 @@ class IntradaySetup:
     session: str  # london or newyork
     close_by: dt.datetime  # flat by the New York rollover
     detail: str
+    #: The level the setup broke, which a retest comes back to (S11): the range edge,
+    #: the VWAP.
+    level: float | None = None
 
 
 @dataclass
@@ -253,6 +256,7 @@ class IntradayEngine:
                 atr=atr,
                 session=session,
                 close_by=self._rollover(closed),
+                level=span.high if direction is Direction.LONG else span.low,
                 detail=(
                     f"closed {side} the {what} {span.low:.2f}-{span.high:.2f}; stop beyond "
                     f"its middle {span.middle:.2f}"
@@ -341,6 +345,7 @@ class IntradayEngine:
                 session=window,
                 close_by=self._rollover(closed),
                 detail=f"closed {side} the VWAP {now:.2f} with it moving that way",
+                level=now,
             )
         ]
 

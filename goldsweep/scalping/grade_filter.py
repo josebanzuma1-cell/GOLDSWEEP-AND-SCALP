@@ -164,6 +164,27 @@ def followed(
     return max(live, key=lambda s: s.time) if live else None
 
 
+def backing_grade(
+    direction: Direction,
+    setups: Sequence[GradedSetup],
+    path: Sequence[PathBar],
+    now: dt.datetime,
+    window: dt.timedelta,
+) -> tuple[str, GradedSetup | None]:
+    """The best live main setup in ``direction`` (S11): its grade ("A+", "A", "B";
+    "A+ possible" counts as A+) and the setup, or ("none", None)."""
+    rank = {"A+": 0, "A+ possible": 0, "A": 1, "B": 2}
+    live = [
+        s
+        for s in setups
+        if s.direction is direction and s.grade in rank and ended(s, path, now, window) is None
+    ]
+    if not live:
+        return "none", None
+    best = min(live, key=lambda s: (rank[s.grade], -s.time.timestamp()))
+    return ("A+" if rank[best.grade] == 0 else best.grade), best
+
+
 def target_reached(setup: GradedSetup, path: Iterable[PathBar]) -> bool:
     """Has price reached the setup's last target since it formed, before failing (S10)?"""
     if setup.target is None or setup.forming:

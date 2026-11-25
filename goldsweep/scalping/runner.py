@@ -68,16 +68,18 @@ from goldsweep.execution.executor import (
     trades_between,
 )
 from goldsweep.risk.account_guard import AccountGuard, Exposure
-from goldsweep.risk.risk_manager import PAUSE_AFTER_LOSSES, NewsEvent
+from goldsweep.risk.risk_manager import PAUSE_AFTER_LOSSES, NewsEvent, position_size
 from goldsweep.scalping.grade_filter import (
     GRADE_NAMES,
     GradedSetup,
     PathBar,
+    backing_grade,
     ended,
     followed,
     hft_permission,
     target_reached,
 )
+from goldsweep.scalping.grading import Analysis, Grade, grade_scalp
 from goldsweep.scalping.logic import HFT, INTRADAY, SWING, Candidate, ModeLogic, make_logic
 from goldsweep.scalping.modes import REGISTRY
 from goldsweep.scalping.plan import LadderCosts, scalp_risk
@@ -93,6 +95,7 @@ from goldsweep.scalping.recovery import (
     primary_of,
     stack_refusal,
 )
+from goldsweep.scalping.retest import CONFIRMED, FAILED, RetestWatch, check, confirmed, retest_level
 from goldsweep.scalping.stats import mode_of
 from goldsweep.storage.db import Database
 
@@ -157,6 +160,10 @@ class ScalpContext:
     hft_setups: Sequence[GradedSetup] | None = None
     #: Each mode's graded setups to follow (S10); a mode missing or None: no filter.
     setups: Mapping[str, Sequence[GradedSetup] | None] | None = None
+    #: Every live A+, A or B main setup per mode, for grading a scalp (S11, D118), and
+    #: the main strategy's picture of the market sent with each signal.
+    graded: Mapping[str, Sequence[GradedSetup]] | None = None
+    analysis: Analysis | None = None
 
     def setups_for(self, mode: str) -> Sequence[GradedSetup] | None:
         """The setups ``mode`` follows (``None``: it may trade either way)."""
@@ -196,6 +203,7 @@ class ModeSlot:
     demo: Executor | None = None
     stopped_out: dict[Direction, dt.datetime] = field(default_factory=dict)
     decision: Decision | None = None
+    retest: RetestWatch | None = None  # a setup waiting for its retest (S11)
 
     @property
     def name(self) -> str:
@@ -440,9 +448,19 @@ class ScalperRunner:
                 if warmup or i != newest or slot.name not in context.selected:
                     continue
                 texts += self._add_if_due(slot, context, c, start + MINUTE, now)
-                if not candidates:
+                waiting = slot.retest is not None
+                retested = self._retest_tick(slot, start, h, low, c)
+                if retested is not None:
+                    text = self._consider(slot, retested, context, now)
+                    if text:
+                        texts.append(text)
+                        continue  # one scalp at a time
+                if not candidates and not waiting:
                     slot.decision = Decision(start + MINUTE, "NONE", "no setup on the last bar")
                 for candidate in candidates:
+                    if self._waits_for_retest(slot):
+                        self._start_retest(slot, candidate, now)
+                        continue
                     text = self._consider(slot, candidate, context, now)
                     if text:
                         texts.append(text)
@@ -460,11 +478,17 @@ class ScalperRunner:
                 changed |= self.follows.pop(plan_id, None) is not None
                 if not is_add(plan_id) and not self._still_open(plan_id):
                     changed |= self.adds.pop(plan_id, None) is not None
+            signals = self._config.execution.signals_only
+            if signals and event.kind is EventKind.STOP_MOVED and event.detail == "breakeven":
+                texts.append(messages.breakeven_reminder(event.plan, slot.name, event.price))
             if event.kind is EventKind.CLOSED and event.trade is not None:
                 trade = event.trade
                 if trade.exit_reason is ExitReason.STOP:
                     slot.stopped_out[trade.direction] = trade.exit_time
-                texts.append(messages.scalp_closed(trade, slot.name, slot.where(executor)))
+                if signals:
+                    texts.append(messages.scalp_signal_result(trade, slot.name))
+                else:
+                    texts.append(messages.scalp_closed(trade, slot.name, slot.where(executor)))
         if changed:
             self._save_follows()
         return texts
@@ -472,6 +496,95 @@ class ScalperRunner:
     def _still_open(self, plan_id: str) -> bool:
         return any(p["id"] == plan_id for e in self.executors for p in e.open_positions) or any(
             plan.id == plan_id for e in self.executors for plan in e.pending_orders
+        )
+
+    # -- S11: the retest ----------------------------------------------------------------- #
+
+    def _waits_for_retest(self, slot: ModeSlot) -> bool:
+        retest = self._config.scalper.retest
+        return retest.enabled and slot.name in retest.modes
+
+    def _start_retest(self, slot: ModeSlot, candidate: Candidate, now: dt.datetime) -> None:
+        """A new setup waits for price to come back to its level (S11, D118)."""
+        side = "BUY" if candidate.direction is Direction.LONG else "SELL"
+        gate = slot.logic.gate(candidate)
+        if not gate.passed:
+            slot.decision = Decision(
+                candidate.time,
+                side,
+                f"skipped: {gate.reason or 'the modes filters'}",
+                candidate.rule,
+            )
+            return
+        try:
+            spread = float(self._broker.spread_points(self.spec.name))
+        except BrokerError:
+            return
+        costs = LadderCosts.of(self.spec, self._config.backtest.costs, spread)
+        made = slot.logic.plan(candidate, costs, plan_id="retest", session=gate.session)
+        if made.plan is None:
+            slot.decision = Decision(
+                candidate.time, side, f"skipped: {made.reason}", candidate.rule
+            )
+            return
+        retest = self._config.scalper.retest
+        level = retest_level(candidate, retest.pullback_r)
+        slot.retest = RetestWatch(
+            candidate=replace(candidate, retest_level=level),
+            level=level,
+            target=made.plan.take_profit_1,
+            tolerance=retest.tolerance_atr * candidate.atr,
+            deadline=candidate.time + dt.timedelta(minutes=retest.window(slot.name)),
+        )
+        slot.decision = Decision(
+            candidate.time,
+            side,
+            f"waiting for a retest of {level:.2f} until {slot.retest.deadline:%H:%M} UTC",
+            candidate.rule,
+        )
+        log.info("scalp waits for its retest", mode=slot.name, level=round(level, 2))
+
+    def _retest_tick(
+        self, slot: ModeSlot, opened: dt.datetime, high: float, low: float, close: float
+    ) -> Candidate | None:
+        """The candidate entered on its retest, when this bar confirmed it; else None."""
+        watch = slot.retest
+        if watch is None or opened < watch.candidate.time:
+            return None
+        outcome = check(watch, opened, high, low, close)
+        if outcome is None:
+            return None
+        slot.retest = None
+        side = "BUY" if watch.long else "SELL"
+        if outcome == CONFIRMED:
+            return confirmed(watch.candidate, close, opened + MINUTE)
+        why = (
+            f"price crossed the stop before the retest of {watch.level:.2f}"
+            if outcome == FAILED
+            else f"no retest of {watch.level:.2f} (it ran to TP1 or the window ended)"
+        )
+        slot.decision = Decision(opened + MINUTE, side, f"skipped: {why}", watch.candidate.rule)
+        log.info("scalp retest " + outcome, mode=slot.name, level=round(watch.level, 2))
+        return None
+
+    def _grade(
+        self, slot: ModeSlot, candidate: Candidate, context: ScalpContext, now: dt.datetime
+    ) -> Grade:
+        """A+, A or B (or none) for a scalp, from the main setups, bias, levels, news."""
+        graded = (context.graded or {}).get(slot.name, [])
+        _grade, window = self._filter(slot.name)
+        backing, setup = backing_grade(candidate.direction, graded, self.path, now, window)
+        level = (
+            candidate.retest_level if candidate.retest_level is not None else candidate.reference
+        )
+        return grade_scalp(
+            candidate.direction,
+            backing=backing,
+            backing_label=setup.label if setup is not None else "",
+            analysis=context.analysis or Analysis(),
+            level=level,
+            level_kind=getattr(candidate.source, "level_kind", None),
+            atr=candidate.atr,
         )
 
     # -- S10: the setup is done; grid / averaging down -------------------------------- #
@@ -750,6 +863,11 @@ class ScalperRunner:
         cooldown = dt.timedelta(seconds=self._config.scalper.risk.cooldown_sec)
         if stopped is not None and candidate.time - stopped < cooldown:
             return skip("cooldown after a stop-out")
+        graded = self._grade(slot, candidate, context, now)
+        lowest = self._config.scalper.signal_min_grade
+        if not graded.at_least(lowest):
+            letter = graded.letter or "below B"
+            return skip(f"graded {letter}: {'; '.join(graded.reasons)}")
         shared = self.shared_refusal(
             slot,
             candidate.direction,
@@ -797,6 +915,22 @@ class ScalperRunner:
             self._save_follows()
         where = slot.where(executor)
         log.info("scalp placed", id=plan.id, where=where, rule=candidate.rule, risk_pct=pct)
+        if self._config.execution.signals_only:
+            slot.decision = Decision(
+                candidate.time, side, f"signal {graded.letter} sent: {plan.id}", candidate.rule
+            )
+            equity = context.equity or executor.equity
+            size = position_size(equity, plan.entry, plan.stop_loss, self.spec, pct)
+            return messages.scalp_signal(
+                plan,
+                slot.name,
+                graded,
+                context.analysis or Analysis(),
+                reason=candidate.reason,
+                retest=candidate.retest_level,
+                lots=size.lots if size.ok else None,
+                valid_min=self._config.scalper.signal_valid_min,
+            )
         slot.decision = Decision(
             candidate.time, side, f"placed {plan.id} ({where})", candidate.rule
         )
